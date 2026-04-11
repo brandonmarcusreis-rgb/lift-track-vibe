@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lift App">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="icon" type="image/png" href="/icon-192.png">
+  <title>lift_app</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="top-bar">
+    <div class="prompt" id="prompt">$ ./lift_app</div>
+    <div class="week-nav">
+      <button id="weekPrev" aria-label="prev week">‹</button>
+      <span id="weekLabel">week_01</span>
+      <button id="weekNext" aria-label="next week">›</button>
+    </div>
+  </header>
+
+  <nav class="day-tabs" id="dayTabs">
+    <button data-day="monday" class="active">mon</button>
+    <button data-day="tuesday">tue</button>
+    <button data-day="wednesday">wed</button>
+    <button data-day="thursday">thu</button>
+    <button data-day="friday">fri</button>
+    <button data-day="analytics">stats</button>
+    <button data-day="settings">sett</button>
+  </nav>
+
+  <main id="content"></main>
+
+  <footer class="bottom-bar">
+    <span id="footerPrompt">user@iphone ~ %</span>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
