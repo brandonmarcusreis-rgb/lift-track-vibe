@@ -194,39 +194,67 @@ async function ghHeaders() {
 }
 
 async function fetchCurrentSha() {
-  const url = await ghContentsUrl();
-  const headers = { ...(await ghHeaders()), 'Cache-Control': 'no-cache' };
-  // Cache-bust query to defeat any CDN caching
-  const r = await fetch(url + '?_=' + Date.now(), { headers, cache: 'no-store' });
-  if (r.ok) {
-    const j = await r.json();
-    return j.sha;
+  try {
+    let url, headers;
+    try { url = await ghContentsUrl(); }
+    catch (e) { throw new Error('url build: ' + (e.message || e)); }
+    try { headers = { ...(await ghHeaders()), 'Cache-Control': 'no-cache' }; }
+    catch (e) { throw new Error('headers build: ' + (e.message || e)); }
+    const fullUrl = url + '?_=' + Date.now();
+    let r;
+    try {
+      r = await fetch(fullUrl, { headers, cache: 'no-store' });
+    } catch (e) {
+      throw new Error('fetch("' + fullUrl.slice(0, 80) + '"): ' + (e.message || e));
+    }
+    if (r.ok) {
+      try {
+        const j = await r.json();
+        return j.sha;
+      } catch (e) { throw new Error('json parse: ' + (e.message || e)); }
+    }
+    if (r.status === 404) return null;
+    const txt = await r.text();
+    throw new Error(`status ${r.status}: ${txt.slice(0,150)}`);
+  } catch (e) {
+    // Re-throw with version tag so we can verify the user is on the new build
+    throw new Error('[v115] ' + (e.message || e));
   }
-  if (r.status === 404) return null;
-  const txt = await r.text();
-  throw new Error(`GET ${r.status}: ${txt.slice(0,150)}`);
 }
 
 async function putContents(sha) {
-  const url = await ghContentsUrl();
-  const headers = { ...(await ghHeaders()), 'Content-Type': 'application/json' };
-  const payload = JSON.stringify({
-    version: 1,
-    saved_at: new Date().toISOString(),
-    data: state,
-  }, null, 2);
+  let url, headers, payload, encoded;
+  try { url = await ghContentsUrl(); }
+  catch (e) { throw new Error('url build: ' + (e.message || e)); }
+  try { headers = { ...(await ghHeaders()), 'Content-Type': 'application/json' }; }
+  catch (e) { throw new Error('headers: ' + (e.message || e)); }
+  try {
+    payload = JSON.stringify({
+      version: 1,
+      saved_at: new Date().toISOString(),
+      data: state,
+    }, null, 2);
+  } catch (e) { throw new Error('json stringify: ' + (e.message || e)); }
+  try { encoded = utf8ToBase64(payload); }
+  catch (e) { throw new Error('base64 encode (payload ' + payload.length + ' chars): ' + (e.message || e)); }
   const body = {
     message: `auto-backup ${new Date().toISOString()}`,
-    content: utf8ToBase64(payload),
+    content: encoded,
   };
   if (sha) body.sha = sha;
-  return fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
+  try {
+    return await fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
+  } catch (e) { throw new Error('fetch PUT ' + url.slice(0,60) + ': ' + (e.message || e)); }
 }
 
 async function backupToGithub() {
   // First attempt
-  let sha = await fetchCurrentSha();
-  let resp = await putContents(sha);
+  let sha;
+  try { sha = await fetchCurrentSha(); }
+  catch (e) { throw new Error('GET sha failed: ' + (e.message || e)); }
+  let resp;
+  try { resp = await putContents(sha); }
+  catch (e) { throw new Error('PUT failed: ' + (e.message || e)); }
 
   // Retry once on 409 (sha conflict) or 422 (sha required) with fresh SHA
   if (resp.status === 409 || resp.status === 422) {
@@ -270,7 +298,7 @@ async function restoreFromGithub() {
     render();
     alert('Restored from GitHub.');
   } catch (e) {
-    alert('Restore failed: ' + (e.message || e));
+    showError('Restore failed', e.message || e);
   }
 }
 
@@ -304,7 +332,7 @@ async function testGithubConnection() {
     }
   } catch (e) {
     lines.push(`✗ STEP 1 network error: ${e.message || e}`);
-    alert(lines.join('\n'));
+    showError('Connection test failed', lines.join('\n'));
     return;
   }
 
@@ -332,7 +360,7 @@ async function testGithubConnection() {
     }
   } catch (e) {
     lines.push(`✗ STEP 2 network error: ${e.message || e}`);
-    alert(lines.join('\n'));
+    showError('Connection test failed', lines.join('\n'));
     return;
   }
 
@@ -354,7 +382,9 @@ async function testGithubConnection() {
     lines.push(`✗ STEP 3 network error: ${e.message || e}`);
   }
 
-  alert(lines.join('\n'));
+  const summary = lines.join('\n');
+  if (summary.includes('✗')) showError('Connection test issue', summary);
+  else alert(summary);
 }
 
 // ─── Health data (Apple Watch via Shortcut → GitHub) ───
@@ -481,11 +511,11 @@ function renderHealthBlock(health) {
     scales: {
       x: {
         ticks: { color, font: { family: 'Menlo, monospace', size: 8 }, maxRotation: 60, minRotation: 60 },
-        grid: { color: '#1B7E24' },
+        grid: { color: 'rgba(40,254,20,0.08)' },
       },
       y: {
         ticks: { color, font: { family: 'Menlo, monospace', size: 9 } },
-        grid: { color: '#1B7E24' },
+        grid: { color: 'rgba(40,254,20,0.08)' },
       },
     },
   });
@@ -672,6 +702,40 @@ let state = loadState();
   }
   if (changed) saveState();
 })();
+
+// Migrate "Back" → "Upper Back" and "Legs" → "Thighs" in custom exercise lists
+(function migrateBackToUpperBack() {
+  let changed = false;
+  if (state.exercises) {
+    for (const day of Object.keys(state.exercises)) {
+      const list = state.exercises[day];
+      if (!Array.isArray(list)) continue;
+      for (const ex of list) {
+        if (ex.group === 'Back') { ex.group = 'Upper Back'; changed = true; }
+        if (ex.group === 'Legs') { ex.group = 'Thighs'; changed = true; }
+      }
+    }
+  }
+  if (state.bodyActivities) {
+    for (const day of Object.keys(state.bodyActivities)) {
+      const list = state.bodyActivities[day];
+      if (!Array.isArray(list)) continue;
+      for (const act of list) {
+        if (act.group === 'Back') { act.group = 'Upper Back'; changed = true; }
+        if (act.group === 'Legs') { act.group = 'Thighs'; changed = true; }
+      }
+    }
+  }
+  // Also migrate the group_last_worked map
+  try {
+    const map = JSON.parse(localStorage.getItem('lift_app_group_last_worked') || '{}');
+    if (map['Back'] && !map['Upper Back']) { map['Upper Back'] = map['Back']; delete map['Back']; }
+    if (map['Legs'] && !map['Thighs']) { map['Thighs'] = map['Legs']; delete map['Legs']; }
+    localStorage.setItem('lift_app_group_last_worked', JSON.stringify(map));
+  } catch {}
+  if (changed) saveState();
+})();
+
 let currentWeek = parseInt(localStorage.getItem('lift_app_week') || '1', 10);
 
 // Auto-jump to today's weekday on first open of the day
@@ -856,11 +920,18 @@ function ensureCustomDayExercises(day) {
 function normalizeGroup(group) {
   if (!group) return null;
   if (EXERCISE_GROUPS.includes(group)) return group;
+  // Legacy migrations
+  if (group === 'Back') return 'Upper Back';
+  if (group === 'Legs') return 'Thighs';
   const HYBRID_MAP = {
-    'Legs/Posterior': 'Legs',
+    'Legs/Posterior': 'Thighs',
     'Legs/Core':      'Core',
     'Triceps/Chest':  'Triceps',
     'Back/Rear Delt': 'Shoulders',
+    'Hamstrings':     'Thighs',
+    'Quads':          'Thighs',
+    'Posterior':      'Thighs',
+    'Rear Delts':     'Shoulders',
   };
   if (HYBRID_MAP[group]) return HYBRID_MAP[group];
   const first = group.split('/')[0].trim();
@@ -1620,8 +1691,17 @@ function toggleExerciseCompleted(card, day, exName) {
     exState.completed = false;
     saveState();
     card.classList.remove('completed');
+    updateSectionCompletion(card, day);
+    // Recalculate heatmap for this group since we just un-completed
+    const exercises = getExercisesForDay(day);
+    const cfg = exercises.find(e => e.name === exName);
+    if (cfg) unstampGroupIfNeeded(cfg.group, day);
     return;
   }
+  // Look up the group for this exercise so we can stamp the heatmap
+  const exercises = getExercisesForDay(day);
+  const exCfg = exercises.find(e => e.name === exName);
+
   // Flash rainbow, then collapse
   card.classList.add('flashing');
   const onEnd = (e) => {
@@ -1631,9 +1711,23 @@ function toggleExerciseCompleted(card, day, exName) {
     card.classList.add('completed');
     exState.completed = true;
     saveState();
+    updateSectionCompletion(card, day);
+    // Stamp the muscle group as worked for the heatmap
+    if (exCfg) stampGroupFromExercise(exCfg.group, day);
   };
   card.addEventListener('animationend', onEnd);
   if (navigator.vibrate) navigator.vibrate(20);
+}
+
+function updateSectionCompletion(card, day) {
+  const section = card.closest('.collapsible-section[data-section="weight"]');
+  if (!section) return;
+  const exercises = getExercisesForDay(day);
+  if (exercises.length === 0) return;
+  const allDone = exercises.every(ex => {
+    return !!state?.[currentWeek]?.[day]?.exercises?.[ex.name]?.completed;
+  });
+  section.classList.toggle('all-completed', allDone);
 }
 
 function enableTouchReorder(listEl, onReorder) {
@@ -1728,10 +1822,113 @@ function enableTouchReorder(listEl, onReorder) {
   listEl.addEventListener('touchcancel', finishTouch);
 }
 
+// ─── Water intake (14 cups / 7 drops × 2 cups each) ───
+const WATER_DROPS = 7;
+
+function getWater(week, day) {
+  ensure(week, day);
+  // Array of 7 values: 0 (empty), 1 (half), 2 (full)
+  if (!Array.isArray(state[week][day].water) || state[week][day].water.length !== WATER_DROPS) {
+    state[week][day].water = Array(WATER_DROPS).fill(0);
+  }
+  return state[week][day].water;
+}
+
+function setWaterAt(week, day, idx, value) {
+  const arr = getWater(week, day);
+  arr[idx] = value;
+  saveState();
+}
+
+function waterDropSvg(level) {
+  // level: 0 = empty (outline only), 1 = half (blue), 2 = full (deep purple)
+  const drop = 'M16 2 Q16 2, 26 18 Q30 28, 16 36 Q2 28, 6 18 Q16 2, 16 2 Z';
+  if (level === 2) {
+    return `
+      <svg viewBox="0 0 32 38" class="water-drop-svg">
+        <path d="${drop}" fill="#7C3AED" stroke="#7C3AED" stroke-width="1.8" stroke-linejoin="round"/>
+      </svg>
+    `;
+  }
+  if (level === 1) {
+    const clipId = 'wc' + Math.random().toString(36).slice(2,8);
+    return `
+      <svg viewBox="0 0 32 38" class="water-drop-svg">
+        <defs>
+          <clipPath id="${clipId}"><path d="${drop}"/></clipPath>
+        </defs>
+        <path d="${drop}" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linejoin="round"/>
+        <rect x="0" y="19" width="32" height="19" fill="#3B82F6" clip-path="url(#${clipId})"/>
+      </svg>
+    `;
+  }
+  return `
+    <svg viewBox="0 0 32 38" class="water-drop-svg">
+      <path d="${drop}" fill="none" stroke="#94A3B8" stroke-width="1.8" stroke-linejoin="round"/>
+    </svg>
+  `;
+}
+
+function renderWaterTracker(day) {
+  const block = el(`
+    <div class="water-tracker" data-block="water">
+      <div class="water-header">
+        <span class="water-title">## water</span>
+        <span class="water-counter" data-role="water-counter">0 / 14</span>
+      </div>
+      <div class="water-drops"></div>
+    </div>
+  `);
+  const dropsContainer = block.querySelector('.water-drops');
+  const counter = block.querySelector('[data-role="water-counter"]');
+
+  const refreshCounter = () => {
+    const arr = getWater(currentWeek, day);
+    const cups = arr.reduce((a,b) => a+b, 0);
+    counter.textContent = `${cups} / 14`;
+    if (cups >= 14) counter.classList.add('complete');
+    else counter.classList.remove('complete');
+  };
+
+  for (let i = 0; i < WATER_DROPS; i++) {
+    const drop = el(`<button class="water-drop" data-idx="${i}" aria-label="water drop ${i+1}"></button>`);
+    const renderDrop = () => {
+      const arr = getWater(currentWeek, day);
+      drop.innerHTML = waterDropSvg(arr[i]);
+      drop.classList.toggle('filled', arr[i] === 2);
+      drop.classList.toggle('half', arr[i] === 1);
+    };
+    renderDrop();
+    drop.addEventListener('click', () => {
+      const arr = getWater(currentWeek, day);
+      const current = arr[i];
+      const next = (current + 1) % 3; // 0 → 1 → 2 → 0
+      setWaterAt(currentWeek, day, i, next);
+      renderDrop();
+      refreshCounter();
+      if (next === 2) {
+        // Trigger the filled-circle animation
+        const burst = document.createElement('span');
+        burst.className = 'water-complete-burst';
+        drop.appendChild(burst);
+        if (navigator.vibrate) navigator.vibrate(15);
+        burst.addEventListener('animationend', () => burst.remove());
+      }
+    });
+    dropsContainer.appendChild(drop);
+  }
+  refreshCounter();
+  return block;
+}
+
 function renderDay(day) {
   const exercises = getExercisesForDay(day);
   const main = document.getElementById('content');
   main.innerHTML = '';
+  // Scroll to top whenever we render a day so the water/macros/baseline
+  // snapshot is always in view regardless of screen size.
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  main.scrollTop = 0;
   const prevWeek = currentWeek - 1;
 
   // ─── Top split: daily_tracking (yellow) + macros (orange) ───
@@ -1753,6 +1950,9 @@ function renderDay(day) {
     editBtn.textContent = supplementsEditMode ? 'done' : 'add/remove';
     renderSupplementsRows(supplementsList, day);
   });
+
+  // ─── Water tracker (white) — sits above daily_tracking + macros ───
+  main.appendChild(renderWaterTracker(day));
 
   const topSplit = el(`<div class="top-split"></div>`);
   topSplit.appendChild(habitsBlock);
@@ -2074,6 +2274,13 @@ function buildWeightSection(day, exercises, prevWeek) {
   });
 
   wireSectionHandlers(section, 'weight');
+
+  // Check if all exercises are already completed on load
+  if (exercises.length > 0) {
+    const allDone = exercises.every(ex => !!state?.[currentWeek]?.[day]?.exercises?.[ex.name]?.completed);
+    if (allDone) section.classList.add('all-completed');
+  }
+
   return section;
 }
 
@@ -2432,6 +2639,77 @@ function renderMacros(day) {
   return block;
 }
 
+// ─── Error display with copy button ───
+function showError(title, message) {
+  // Remove any existing error modal first
+  document.querySelectorAll('.error-modal-backdrop').forEach(n => n.remove());
+
+  const safeMessage = String(message).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const modal = el(`
+    <div class="error-modal-backdrop">
+      <div class="error-modal">
+        <div class="error-modal-header">
+          <span class="error-modal-title">✗ ${title}</span>
+          <button class="error-modal-close" aria-label="close">✕</button>
+        </div>
+        <pre class="error-modal-body">${safeMessage}</pre>
+        <div class="error-modal-actions">
+          <button class="btn error-modal-copy">$ copy_error</button>
+          <button class="btn error-modal-ok">$ ok</button>
+        </div>
+        <div class="error-modal-hint">
+          send the copied text to brandon to triage
+        </div>
+      </div>
+    </div>
+  `);
+
+  const close = () => modal.remove();
+  modal.querySelector('.error-modal-close').addEventListener('click', close);
+  modal.querySelector('.error-modal-ok').addEventListener('click', close);
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+  const copyBtn = modal.querySelector('.error-modal-copy');
+  copyBtn.addEventListener('click', async () => {
+    const fullText = `[${title}]\n${message}\n\n— lift_app @ ${new Date().toISOString()}`;
+    try {
+      await navigator.clipboard.writeText(fullText);
+      copyBtn.textContent = '✓ copied';
+      setTimeout(() => { copyBtn.textContent = '$ copy_error'; }, 1800);
+    } catch {
+      // Fallback for older browsers
+      const ta = document.createElement('textarea');
+      ta.value = fullText;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); copyBtn.textContent = '✓ copied'; }
+      catch { copyBtn.textContent = '✗ copy failed'; }
+      ta.remove();
+      setTimeout(() => { copyBtn.textContent = '$ copy_error'; }, 1800);
+    }
+  });
+
+  document.body.appendChild(modal);
+}
+
+// ─── Chart.js global polish ───
+if (typeof ChartDataLabels !== 'undefined') Chart.register(ChartDataLabels);
+Chart.defaults.font.family = 'Menlo, monospace';
+Chart.defaults.color = '#AAA';
+Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(0,0,0,0.85)';
+Chart.defaults.plugins.tooltip.borderColor = 'rgba(40,254,20,0.3)';
+Chart.defaults.plugins.tooltip.borderWidth = 1;
+Chart.defaults.plugins.tooltip.cornerRadius = 4;
+Chart.defaults.plugins.tooltip.titleFont = { family: 'Menlo, monospace', size: 11, weight: '600' };
+Chart.defaults.plugins.tooltip.bodyFont = { family: 'Menlo, monospace', size: 10 };
+Chart.defaults.plugins.tooltip.padding = 8;
+// Disable datalabels globally — enable per-chart
+Chart.defaults.plugins.datalabels = { display: false };
+Chart.defaults.elements.bar.borderRadius = 3;
+Chart.defaults.elements.bar.borderSkipped = false;
+Chart.defaults.elements.line.borderWidth = 2;
+Chart.defaults.elements.point.hoverRadius = 5;
+
 let chartInstances = [];
 function destroyCharts() {
   chartInstances.forEach(c => c.destroy());
@@ -2620,15 +2898,54 @@ function renderAnalytics() {
   });
 
   const macroAvgRowsHtml = macroOrder.map(f =>
-    `<span class="macro-avg-chip"><span class="macro-avg-label">${f}</span> <span class="macro-avg-value">${macroAvgs[f] != null ? macroAvgs[f] + 'g' : '—'}</span></span>`
+    `<div class="macro-avg-chip"><div class="macro-avg-label">${f}</div><div class="macro-avg-value">${macroAvgs[f] != null ? macroAvgs[f] + 'g' : '—'}</div></div>`
   ).join('');
 
-  const macroAvgBar = el(`
-    <div class="chart-container macro-avg-bar" data-chart="macros-avg">
-      <div class="macro-avg-inline">${macroAvgRowsHtml}</div>
+  // ── Water intake average (cups/day) across all logged days ──
+  const waterValues = [];
+  for (let w = 1; w <= currentWeek; w++) {
+    for (const d of Object.keys(DAYS)) {
+      const arr = state?.[w]?.[d]?.water;
+      if (Array.isArray(arr)) {
+        const cups = arr.reduce((a,b) => a + (b || 0), 0);
+        if (cups > 0) waterValues.push(cups);
+      }
+    }
+  }
+  const avgWater = waterValues.length ? Math.round((waterValues.reduce((a,b) => a+b, 0) / waterValues.length) * 10) / 10 : null;
+  const waterPct = avgWater != null ? Math.min(100, Math.round((avgWater / 14) * 100)) : 0;
+
+  const avgRow = el(`
+    <div class="avg-row">
+      <div class="chart-container avg-macros-box" data-chart="macros-avg">
+        <div class="avg-box-title orange">## macros_avg</div>
+        <div class="macro-avg-grid">${macroAvgRowsHtml}</div>
+      </div>
+      <div class="chart-container avg-water-box" data-chart="water-avg">
+        <div class="avg-box-title" style="color:#A78BFA">## water_avg</div>
+        <div class="water-avg-visual">
+          <svg viewBox="0 0 80 96" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <clipPath id="water-avg-clip">
+                <path d="M40 6 Q40 6, 66 44 Q74 72, 40 92 Q6 72, 14 44 Q40 6, 40 6 Z"/>
+              </clipPath>
+              <linearGradient id="water-avg-grad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#60A5FA"/>
+                <stop offset="100%" stop-color="#7C3AED"/>
+              </linearGradient>
+            </defs>
+            <path d="M40 6 Q40 6, 66 44 Q74 72, 40 92 Q6 72, 14 44 Q40 6, 40 6 Z"
+              fill="none" stroke="rgba(167,139,250,0.4)" stroke-width="2" stroke-linejoin="round"/>
+            <rect x="0" y="${96 - (waterPct * 0.96)}" width="80" height="${waterPct * 0.96}" fill="url(#water-avg-grad)" clip-path="url(#water-avg-clip)" opacity="0.9"/>
+            <text x="40" y="56" text-anchor="middle" fill="#FFF" font-family="Menlo, monospace" font-size="20" font-weight="700" style="text-shadow:0 1px 2px rgba(0,0,0,0.7)">${avgWater != null ? avgWater : '—'}</text>
+            <text x="40" y="70" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-family="Menlo, monospace" font-size="8" letter-spacing="1">cups/day</text>
+          </svg>
+        </div>
+        <div class="water-avg-caption">target: 14 · ${avgWater != null ? waterPct + '%' : '—'}</div>
+      </div>
     </div>
   `);
-  main.appendChild(macroAvgBar);
+  main.appendChild(avgRow);
 
   const macrosContainer = el(`
     <div class="chart-container" data-chart="macros">
@@ -2646,9 +2963,9 @@ function renderAnalytics() {
   const health = getCachedHealth();
   const baselineOrder = ['sleep', 'steps', 'stand'];
   const baselineBarColors = {
-    sleep: '#6EE7B7',
+    sleep: '#818CF8',
     steps: '#34D399',
-    stand: '#10B981',
+    stand: '#FB923C',
   };
   const baselineTrendStyles = {
     sleep: { borderDash: [] },
@@ -2756,13 +3073,13 @@ function renderAnalytics() {
       scales: {
         x: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 11 } },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
         y: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
       },
     },
@@ -2801,13 +3118,13 @@ function renderAnalytics() {
       scales: {
         x: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 9 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
         y: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
       },
     },
@@ -2865,13 +3182,13 @@ function renderAnalytics() {
       scales: {
         x: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 11 } },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
         y: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
       },
     },
@@ -2910,13 +3227,13 @@ function renderAnalytics() {
       scales: {
         x: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 9 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
         y: {
           ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: '#665500' },
-          border: { color: '#FFFF55' },
+          grid: { color: 'rgba(255,255,85,0.08)' },
+          border: { color: 'rgba(255,255,85,0.3)' },
         },
       },
     },
@@ -2968,18 +3285,27 @@ function renderAnalytics() {
             filter: (item) => !item.text.endsWith('_trend'),
           },
         },
+        datalabels: {
+          display: (ctx) => ctx.dataset.type !== 'line' && ctx.dataset.data[ctx.dataIndex] > 0,
+          anchor: 'end',
+          align: 'end',
+          color: '#FFAFCC',
+          font: { family: 'Menlo, monospace', size: 8, weight: '600' },
+          formatter: (v) => v > 0 ? v + '%' : '',
+          offset: -2,
+        },
       },
       scales: {
         x: {
           ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 8 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: '#66334D' },
-          border: { color: '#FFAFCC' },
+          grid: { color: 'rgba(255,175,204,0.08)', lineWidth: 1 },
+          border: { color: 'rgba(255,175,204,0.3)' },
         },
         y: {
           beginAtZero: true,
-          ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 9 } },
-          grid: { color: '#66334D' },
-          border: { color: '#FFAFCC' },
+          ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 9 }, callback: (v) => v + '%' },
+          grid: { color: 'rgba(255,175,204,0.1)', lineWidth: 1 },
+          border: { color: 'rgba(255,175,204,0.3)' },
         },
         yTrend: {
           position: 'right',
@@ -3071,21 +3397,50 @@ function renderAnalytics() {
             filter: (item) => !item.text.endsWith('_trend'),
           },
         },
+        datalabels: {
+          display: (ctx) => {
+            if (ctx.dataset.type === 'line') return false;
+            // Only show total on top segment of stacked bar
+            const meta = ctx.chart.getDatasetMeta(ctx.datasetIndex);
+            if (!meta.stack) return false;
+            const stackDatasets = ctx.chart.data.datasets.filter((d,i) => {
+              const m = ctx.chart.getDatasetMeta(i);
+              return m.stack === meta.stack && !d.type;
+            });
+            const lastVisible = stackDatasets[stackDatasets.length - 1];
+            if (ctx.dataset !== lastVisible) return false;
+            // Sum the stacked value
+            const total = stackDatasets.reduce((sum, d) => sum + (d.data[ctx.dataIndex] || 0), 0);
+            return total > 0;
+          },
+          anchor: 'end',
+          align: 'end',
+          color: '#FF9933',
+          font: { family: 'Menlo, monospace', size: 8, weight: '600' },
+          formatter: (v, ctx) => {
+            const stackDatasets = ctx.chart.data.datasets.filter((d,i) => {
+              const m = ctx.chart.getDatasetMeta(i);
+              return m.stack && !d.type;
+            });
+            return stackDatasets.reduce((sum, d) => sum + (d.data[ctx.dataIndex] || 0), 0) + 'g';
+          },
+          offset: -2,
+        },
       },
       scales: {
         x: {
           stacked: true,
           ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 8 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: '#663300' },
-          border: { color: '#FF9933' },
+          grid: { color: 'rgba(255,153,51,0.08)', lineWidth: 1 },
+          border: { color: 'rgba(255,153,51,0.3)' },
         },
         y: {
           stacked: true,
           position: 'left',
           beginAtZero: true,
-          ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 9 } },
-          grid: { color: '#663300' },
-          border: { color: '#FF9933' },
+          ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 9 }, callback: (v) => v + 'g' },
+          grid: { color: 'rgba(255,153,51,0.1)', lineWidth: 1 },
+          border: { color: 'rgba(255,153,51,0.3)' },
         },
         yTrend: {
           position: 'right',
@@ -3177,7 +3532,7 @@ function renderSettings() {
     if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
     await runBackup();
     const cfg = getBackupCfg();
-    if (cfg.last_error) alert('Backup failed: ' + cfg.last_error);
+    if (cfg.last_error) showError('Backup failed', cfg.last_error);
     else alert('Backed up at ' + new Date().toLocaleTimeString());
   });
   ghBlock.querySelector('.btn-restore').addEventListener('click', restoreFromGithub);
@@ -3290,7 +3645,7 @@ function importData() {
         render();
         alert('Import successful.');
       } catch (err) {
-        alert('Import failed: ' + err.message);
+        showError('Import failed', err.message || err);
       } finally {
         if (document.body.contains(input)) document.body.removeChild(input);
       }
@@ -3581,7 +3936,16 @@ function showImportFeedback(result) {
       return err.message;
     });
     const more = result.errors.length > 12 ? `<br>… (+${result.errors.length - 12} more)` : '';
-    feedback.innerHTML = `<strong>✗ import failed — no data was changed</strong><br>${lines.join('<br>')}${more}`;
+    feedback.innerHTML = `<strong>✗ import failed — no data was changed</strong><br>${lines.join('<br>')}${more}<br><button class="btn inline-copy-btn" style="margin-top:8px">$ copy_error</button>`;
+    const copyBtn = feedback.querySelector('.inline-copy-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', async () => {
+        const fullText = `[CSV import failed]\n${lines.join('\n')}\n\n— lift_app @ ${new Date().toISOString()}`;
+        try { await navigator.clipboard.writeText(fullText); copyBtn.textContent = '✓ copied'; }
+        catch { copyBtn.textContent = '✗ copy failed'; }
+        setTimeout(() => { copyBtn.textContent = '$ copy_error'; }, 1800);
+      });
+    }
     setTimeout(() => csvBlock.classList.remove('flash-error'), 1600);
   }
 }
@@ -3656,13 +4020,12 @@ function renderImport() {
       // 3. Clear cached health data
       localStorage.removeItem(HEALTH_CACHE_KEY);
       localStorage.removeItem(BASELINE_MANUAL_KEY);
+      localStorage.removeItem(GROUP_WORKED_KEY);
       fb.hidden = false;
       fb.className = 'import-feedback success';
       fb.innerHTML = '<strong>done.</strong> cache cleared — reload the app to pull fresh files.';
     } catch (e) {
-      fb.hidden = false;
-      fb.className = 'import-feedback error';
-      fb.innerHTML = `<strong>error:</strong> ${e.message}`;
+      showError('Clear cache failed', e.message || e);
     }
   });
   main.appendChild(cacheBlock);
@@ -4210,6 +4573,50 @@ function renderWalkthrough() {
       `,
     },
     {
+      title: 'body heatmap',
+      desc: 'tap the grid icon next to the app title. a futuristic front + back body map shows every muscle group you\'ve worked. green = today, pink = resting (1–2 days), outlined = focus (3+ days).',
+      preview: `
+        <div class="wt-row" style="justify-content:center;gap:12px;margin-top:4px">
+          <div style="flex:0 0 auto;border:1px solid rgba(40,254,20,0.3);border-radius:6px;padding:8px;background:var(--bg-dim);width:110px">
+            <div style="color:rgba(40,254,20,0.5);font-size:9px;text-align:center;letter-spacing:2px;margin-bottom:4px">FRONT</div>
+            <svg viewBox="0 0 100 180" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+              <ellipse cx="50" cy="18" rx="10" ry="12" fill="none" stroke="rgba(40,254,20,0.35)" stroke-width="0.6"/>
+              <rect x="46" y="30" width="8" height="6" rx="2" fill="#28FE14" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M30 40 Q35 35 46 36 L46 44 Q38 43 30 46 Z" fill="#28FE14" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M70 40 Q65 35 54 36 L54 44 Q62 43 70 46 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M37 46 Q42 42 50 43 Q58 42 63 46 L63 60 Q58 63 50 63 Q42 63 37 60 Z" fill="#28FE14" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M42 63 L58 63 L57 90 Q53 94 50 94 Q47 94 43 90 Z" fill="rgba(40,254,20,0.15)" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M29 46 Q26 48 24 55 L22 70 Q24 73 26 71 L29 58 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M71 46 Q74 48 76 55 L78 70 Q76 73 74 71 L71 58 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M43 94 Q42 110 41 132 L40 150 Q43 153 46 150 L47 128 Q49 108 50 100 Q46 100 43 94 Z" fill="rgba(40,254,20,0.15)" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M57 94 Q58 110 59 132 L60 150 Q57 153 54 150 L53 128 Q51 108 50 100 Q54 100 57 94 Z" fill="rgba(40,254,20,0.15)" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+            </svg>
+          </div>
+          <div style="flex:0 0 auto;border:1px solid rgba(40,254,20,0.3);border-radius:6px;padding:8px;background:var(--bg-dim);width:110px">
+            <div style="color:rgba(40,254,20,0.5);font-size:9px;text-align:center;letter-spacing:2px;margin-bottom:4px">BACK</div>
+            <svg viewBox="0 0 100 180" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">
+              <ellipse cx="50" cy="18" rx="10" ry="12" fill="none" stroke="rgba(40,254,20,0.35)" stroke-width="0.6"/>
+              <rect x="46" y="30" width="8" height="6" rx="2" fill="rgba(40,254,20,0.15)" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M30 40 Q35 35 46 36 L46 44 Q38 43 30 46 Z" fill="rgba(40,254,20,0.15)" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M70 40 Q65 35 54 36 L54 44 Q62 43 70 46 Z" fill="rgba(40,254,20,0.15)" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M37 40 Q42 35 50 36 Q58 35 63 40 L63 68 Q58 72 50 72 Q42 72 37 68 Z" fill="#28FE14" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M42 72 L58 72 L57 92 Q53 95 50 95 Q47 95 43 92 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M29 46 Q24 48 22 56 L20 70 Q23 73 26 71 L29 58 Z" fill="#28FE14" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M71 46 Q76 48 78 56 L80 70 Q77 73 74 71 L71 58 Z" fill="#28FE14" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M43 95 Q44 102 50 105 Q56 102 57 95 L57 108 Q53 112 50 112 Q47 112 43 108 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M43 150 Q42 162 41 172 Q46 174 47 172 L48 160 Q49 154 49 150 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+              <path d="M57 150 Q58 162 59 172 Q54 174 53 172 L52 160 Q51 154 51 150 Z" fill="#FF69B4" stroke="rgba(40,254,20,0.3)" stroke-width="0.3"/>
+            </svg>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:center;gap:10px;margin-top:8px;font-size:9px">
+          <span style="color:#28FE14">● worked</span>
+          <span style="color:#FF69B4">● resting</span>
+          <span style="color:rgba(40,254,20,0.4)">○ focus</span>
+        </div>
+      `,
+    },
+    {
       title: 'kill a habit in 30 days',
       desc: 'pick a habit to quit. mark each day and rate your cravings 1–5. milestones at day 7, 14, 21, and 30 with escalating fireworks. track your savings and watch the craving trend drop.',
       preview: `
@@ -4237,7 +4644,7 @@ function renderWalkthrough() {
     },
     {
       title: 'navigate with one hand',
-      desc: 'days are at the bottom — thumb-friendly. double-tap the app title for the full menu: stats, settings, import, knowledge base, calendar, and this walkthrough.',
+      desc: 'days are at the bottom — thumb-friendly. tap the app title for the full menu: stats, settings, import, knowledge base, calendar, and this walkthrough.',
       preview: `
         <div class="wt-menu-demo">
           <div class="wt-menu-btn active">tdy</div>
@@ -4248,7 +4655,7 @@ function renderWalkthrough() {
           <div class="wt-menu-btn">sat</div>
           <div class="wt-menu-btn">sun</div>
         </div>
-        <div style="text-align:center;color:var(--fg-dim);font-size:10px;margin-top:8px">double-tap <span style="color:var(--fg)">$ ./lift-track-vibe</span> for the full menu</div>
+        <div style="text-align:center;color:var(--fg-dim);font-size:10px;margin-top:8px">tap <span style="color:var(--fg)">$ ./lift-track-vibe</span> for the full menu</div>
       `,
     },
   ];
@@ -4365,7 +4772,7 @@ function renderKnowledge() {
 
 1. create a <strong>private</strong> github repo (github.com → new → set to private)
 2. generate a <strong>personal access token</strong> (settings → developer settings → tokens → fine-grained → select your repo → contents: read & write)
-3. double-tap <strong>$ ./lift-track-vibe</strong> → tap the ⚙ gear icon → expand <strong>## github_backup</strong>
+3. tap <strong>$ ./lift-track-vibe</strong> → tap the ⚙ gear icon → expand <strong>## github_backup</strong>
 4. enter your github username, repo name, token, and file path (default: data.json)
 5. tap <strong>$ save_config</strong>, then <strong>$ test_connection</strong> to verify
 
@@ -4377,7 +4784,7 @@ once configured, the app auto-commits every change to your repo (debounced 30s).
       title: '## getting_started',
       body: `<strong>lift-track-vibe</strong> is a terminal-themed workout tracker that runs as a PWA on your phone.
 
-<em>> navigating:</em> the bottom bar shows your week days (mon–sun). double-tap the app title <strong>$ ./lift-track-vibe</strong> to open the menu with stats, settings, import, knowledge base, calendar, and support.
+<em>> navigating:</em> the bottom bar shows your week days (mon–sun). tap the app title <strong>$ ./lift-track-vibe</strong> to open the menu with stats, settings, import, knowledge base, calendar, and support.
 
 <em>> today indicator:</em> the current day's tab shows <strong>tdy</strong> in a rainbow animation so you always know where you are.
 
@@ -4431,7 +4838,7 @@ all volume/mass values respect the lb ↔ kg unit toggle in settings.`,
     },
     {
       title: '## stats_analytics',
-      body: `double-tap the app title → tap the chart icon to open analytics.
+      body: `tap the app title → tap the chart icon to open analytics.
 
 <em>> pr_evolution:</em> shows week-over-week changes in your top sets. green ▲ for increases, red ▼ for decreases. grouped by day, alphabetized. only shows exercises that changed.
 
@@ -4449,7 +4856,7 @@ all volume/mass values respect the lb ↔ kg unit toggle in settings.`,
     },
     {
       title: '## calendar_habit_tracker',
-      body: `double-tap the app title → tap the calendar icon.
+      body: `tap the app title → tap the calendar icon.
 
 <em>> setup:</em> pick a habit to quit (drinking, smoking, biting nails, eating junk food, or type your own). optionally enter how much it cost you per day.
 
@@ -4464,8 +4871,29 @@ all volume/mass values respect the lb ↔ kg unit toggle in settings.`,
 <em>> craving trend:</em> a small chart at the bottom plots your intensity ratings over time with a trend line. watch the cravings drop.`,
     },
     {
+      title: '## body_heatmap',
+      body: `tap the <strong>grid icon</strong> (between the app title and the week arrows) to open the body heatmap — a futuristic front + back body map that shows which muscle groups you've worked recently.
+
+<em>> how it works:</em> every time you <strong>complete an exercise</strong> (double-tap to mark done), the muscle group attached to that exercise gets stamped "worked" for that day's date. the heatmap reads those stamps and colors the body accordingly.
+
+<em>> color states:</em>
+• <strong>green (worked)</strong> — completed today
+• <strong>pink (resting)</strong> — completed 1–2 days ago
+• <strong>outline only (focus)</strong> — not worked in 3+ days, or never logged
+
+<em>> two body views side by side:</em>
+• <strong>front:</strong> neck, shoulders, chest, biceps, forearms, core, thighs
+• <strong>back:</strong> shoulders, upper back, lower back, triceps, forearms, glutes, calves
+
+<em>> muscle groups:</em> 12 tracked groups — neck, shoulders, chest, upper back, lower back, biceps, triceps, forearms, core, glutes, thighs, calves. each exercise is assigned a group when you add it. the detail list below the body breaks every group out head-to-toe with its status (today / 2d ago / etc).
+
+<em>> undo:</em> if you double-tap a completed exercise to reopen it, the heatmap recalculates — if no other exercise in that group is still completed, the stamp is removed and the zone fades back.
+
+<em>> design:</em> animated scan lines, glow effects on active zones, labels etched onto the body. use it as a visual check for "what did i skip this week" — if a zone is outlined, it's time to hit it.`,
+    },
+    {
       title: '## settings',
-      body: `double-tap the app title → tap the gear icon.
+      body: `tap the app title → tap the gear icon.
 
 three collapsible boxes (tap the title to expand):
 
@@ -4477,7 +4905,7 @@ three collapsible boxes (tap the title to expand):
     },
     {
       title: '## import_export',
-      body: `double-tap the app title → tap the download icon.
+      body: `tap the app title → tap the download icon.
 
 <em>> json backup:</em> export a full snapshot of all state as a .json file (share via airdrop, files, email). import replaces ALL current data — use with care.
 
@@ -4535,10 +4963,285 @@ function clearAllData() {
   alert('All data cleared.');
 }
 
+// ─── Body Heatmap ───
+const HEATMAP_GROUPS = ['Neck', 'Shoulders', 'Chest', 'Upper Back', 'Biceps', 'Triceps', 'Forearms', 'Core', 'Lower Back', 'Glutes', 'Thighs', 'Calves'];
+const HEATMAP_GREEN = '#28FE14';
+const HEATMAP_PINK  = '#FF69B4';
+const HEATMAP_OUTLINE = 'rgba(40, 254, 20, 0.15)';
+
+// Direct map: { "Chest": "2026-04-12", "Biceps": "2026-04-10", ... }
+const GROUP_WORKED_KEY = 'lift_app_group_last_worked';
+
+function getGroupWorkedMap() {
+  try { return JSON.parse(localStorage.getItem(GROUP_WORKED_KEY)) || {}; }
+  catch { return {}; }
+}
+
+function markGroupWorked(group, dateStr) {
+  const map = getGroupWorkedMap();
+  const existing = map[group];
+  // Only update if this date is newer (or no existing entry)
+  if (!existing || dateStr >= existing) {
+    map[group] = dateStr;
+    localStorage.setItem(GROUP_WORKED_KEY, JSON.stringify(map));
+  }
+}
+
+// Called when an exercise is un-completed — recalculates the group's last-worked
+// date by scanning all days for any remaining completed exercise in that group.
+function unstampGroupIfNeeded(exGroup, dayName) {
+  const group = normalizeGroup(exGroup);
+  if (!group) return;
+
+  // Check if any exercise in this group is still completed on the same day
+  const exercises = getExercisesForDay(dayName);
+  const stillCoveredToday = exercises.some(ex => {
+    if (normalizeGroup(ex.group) !== group) return false;
+    return !!state?.[currentWeek]?.[dayName]?.exercises?.[ex.name]?.completed;
+  });
+  if (stillCoveredToday) return;
+
+  // No exercises in this group are completed on this day anymore.
+  // Scan all days in the current week to find the most recent completed date
+  // for this group, or remove the stamp entirely.
+  const dayNames = Object.keys(DAYS);
+  let bestDate = null;
+  for (const d of dayNames) {
+    const dayExercises = getExercisesForDay(d);
+    for (const ex of dayExercises) {
+      if (normalizeGroup(ex.group) !== group) continue;
+      if (!state?.[currentWeek]?.[d]?.exercises?.[ex.name]?.completed) continue;
+      const dt = dateForDayTab(d);
+      if (!bestDate || dt > bestDate) bestDate = dt;
+    }
+  }
+
+  const map = getGroupWorkedMap();
+  if (bestDate) {
+    map[group] = bestDate;
+  } else {
+    delete map[group];
+  }
+  localStorage.setItem(GROUP_WORKED_KEY, JSON.stringify(map));
+}
+
+// Called when an exercise is completed — stamps the tab's calendar date for that group
+function stampGroupFromExercise(exGroup, dayName) {
+  const group = normalizeGroup(exGroup);
+  if (!group) return;
+  const date = dateForDayTab(dayName || todayWeekdayKey());
+  markGroupWorked(group, date);
+}
+
+// Compute days since each group was last worked, using the direct map
+function calcGroupRecency() {
+  const map = getGroupWorkedMap();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const result = {};
+  for (const g of HEATMAP_GROUPS) {
+    const dateStr = map[g];
+    if (!dateStr) {
+      result[g] = null; // never worked
+    } else {
+      const worked = new Date(dateStr + 'T00:00:00');
+      result[g] = Math.floor((today - worked) / 86400000);
+    }
+  }
+  return result;
+}
+
+function heatmapColor(daysAgo) {
+  if (daysAgo === null) return HEATMAP_OUTLINE;
+  if (daysAgo <= 0) return HEATMAP_GREEN;
+  if (daysAgo <= 2) return HEATMAP_PINK;
+  return HEATMAP_OUTLINE;
+}
+
+function heatmapStatusText(daysAgo) {
+  if (daysAgo === null) return '—';
+  if (daysAgo === 0) return 'today';
+  if (daysAgo === 1) return 'yesterday';
+  return `${daysAgo}d ago`;
+}
+
+function zoneLabelClass(daysAgo) {
+  if (daysAgo === null || daysAgo > 1) return 'zone-label';
+  if (daysAgo <= 0) return 'zone-label active-green';
+  return 'zone-label active-pink';
+}
+
+function scanLines(startY, endY, step) {
+  let lines = '';
+  for (let y = startY; y <= endY; y += step) {
+    lines += `<line class="scan-line" x1="0" y1="${y}" x2="200" y2="${y}"/>`;
+  }
+  return lines;
+}
+
+function buildFrontSvg(recency) {
+  const c = (g) => heatmapColor(recency[g]);
+  const lc = (g) => zoneLabelClass(recency[g]);
+  const ol = 'rgba(40,254,20,0.25)';
+  const glowId = 'glow-f';
+  return `
+    <svg viewBox="0 0 200 390" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="${glowId}" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <linearGradient id="bodyOutline-f" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="rgba(40,254,20,0.35)"/>
+          <stop offset="100%" stop-color="rgba(40,254,20,0.1)"/>
+        </linearGradient>
+      </defs>
+      ${scanLines(20, 385, 12)}
+      <text x="100" y="14" text-anchor="middle" fill="rgba(40,254,20,0.4)" font-size="10" font-family="monospace" letter-spacing="3">FRONT</text>
+      <!-- Head -->
+      <ellipse cx="100" cy="38" rx="18" ry="22" fill="none" stroke="url(#bodyOutline-f)" stroke-width="0.8"/>
+      <!-- Neck -->
+      <rect class="muscle-zone" x="93" y="58" width="14" height="10" rx="3" fill="${c('Neck')}" stroke="${ol}" stroke-width="0.5" ${c('Neck') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Neck')}" x="100" y="65" text-anchor="middle" font-size="5">NECK</text>
+      <!-- Shoulders -->
+      <path class="muscle-zone" d="M62 76 Q72 66, 93 70 L93 83 Q78 81, 62 89 Z" fill="${c('Shoulders')}" stroke="${ol}" stroke-width="0.4" ${c('Shoulders') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M138 76 Q128 66, 107 70 L107 83 Q122 81, 138 89 Z" fill="${c('Shoulders')}" stroke="${ol}" stroke-width="0.4" ${c('Shoulders') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Shoulders')}" x="16" y="78" font-size="6">SHLDR</text>
+      <!-- Chest -->
+      <path class="muscle-zone" d="M74 86 Q84 76, 100 78 Q116 76, 126 86 L126 110 Q116 116, 100 116 Q84 116, 74 110 Z" fill="${c('Chest')}" stroke="${ol}" stroke-width="0.4" ${c('Chest') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Chest')}" x="88" y="100" text-anchor="middle" font-size="6.5">CHEST</text>
+      <!-- Core -->
+      <path class="muscle-zone" d="M86 116 L114 116 L112 180 Q106 186, 100 186 Q94 186, 88 180 Z" fill="${c('Core')}" stroke="${ol}" stroke-width="0.4" ${c('Core') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Core')}" x="100" y="150" text-anchor="middle" font-size="6.5">CORE</text>
+      <!-- Biceps -->
+      <path class="muscle-zone" d="M60 89 Q54 88, 50 102 L46 134 Q50 140, 54 136 L60 112 Q63 98, 61 89 Z" fill="${c('Biceps')}" stroke="${ol}" stroke-width="0.4" ${c('Biceps') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M140 89 Q146 88, 150 102 L154 134 Q150 140, 146 136 L140 112 Q137 98, 139 89 Z" fill="${c('Biceps')}" stroke="${ol}" stroke-width="0.4" ${c('Biceps') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Biceps')}" x="16" y="118" font-size="6">BICEP</text>
+      <!-- Forearms -->
+      <path class="muscle-zone" d="M36 142 Q32 152, 28 174 L26 192 Q30 196, 34 192 L42 170 Q46 154, 44 142 Z" fill="${c('Forearms')}" stroke="${ol}" stroke-width="0.4" ${c('Forearms') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M164 142 Q168 152, 172 174 L174 192 Q170 196, 166 192 L158 170 Q154 154, 156 142 Z" fill="${c('Forearms')}" stroke="${ol}" stroke-width="0.4" ${c('Forearms') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Forearms')}" x="36" y="160" font-size="5.5" transform="rotate(-70 36 160)">FOREARM</text>
+      <!-- Upper arm outer -->
+      <path d="M50 102 Q44 100, 40 116 L36 142 Q40 146, 44 142 L46 134 Z" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <path d="M150 102 Q156 100, 160 116 L164 142 Q160 146, 156 142 L154 134 Z" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <!-- Hands -->
+      <ellipse cx="25" cy="198" rx="5" ry="8" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <ellipse cx="175" cy="198" rx="5" ry="8" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <!-- Thighs -->
+      <path class="muscle-zone" d="M86 186 Q84 212, 82 252 L80 296 Q86 302, 92 296 L95 248 Q99 214, 100 200 Q94 200, 86 186 Z" fill="${c('Thighs')}" stroke="${ol}" stroke-width="0.4" ${c('Thighs') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M114 186 Q116 212, 118 252 L120 296 Q114 302, 108 296 L105 248 Q101 214, 100 200 Q106 200, 114 186 Z" fill="${c('Thighs')}" stroke="${ol}" stroke-width="0.4" ${c('Thighs') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Thighs')}" x="100" y="250" text-anchor="middle" font-size="6">THIGH</text>
+      <!-- Shins (outline only) -->
+      <path d="M80 302 Q78 322, 76 350 L74 370 Q82 376, 88 370 L90 342 Q91 318, 92 302 Z" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <path d="M120 302 Q122 322, 124 350 L126 370 Q118 376, 112 370 L110 342 Q109 318, 108 302 Z" fill="none" stroke="${ol}" stroke-width="0.4"/>
+    </svg>`;
+}
+
+function buildBackSvg(recency) {
+  const c = (g) => heatmapColor(recency[g]);
+  const lc = (g) => zoneLabelClass(recency[g]);
+  const ol = 'rgba(40,254,20,0.25)';
+  const glowId = 'glow-b';
+  return `
+    <svg viewBox="0 0 200 390" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="${glowId}" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <linearGradient id="bodyOutline-b" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="rgba(40,254,20,0.35)"/>
+          <stop offset="100%" stop-color="rgba(40,254,20,0.1)"/>
+        </linearGradient>
+      </defs>
+      ${scanLines(20, 385, 12)}
+      <text x="100" y="14" text-anchor="middle" fill="rgba(40,254,20,0.4)" font-size="10" font-family="monospace" letter-spacing="3">BACK</text>
+      <!-- Head -->
+      <ellipse cx="100" cy="38" rx="18" ry="22" fill="none" stroke="url(#bodyOutline-b)" stroke-width="0.8"/>
+      <!-- Neck -->
+      <rect class="muscle-zone" x="93" y="58" width="14" height="10" rx="3" fill="${c('Neck')}" stroke="${ol}" stroke-width="0.5" ${c('Neck') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <!-- Shoulders -->
+      <path class="muscle-zone" d="M62 76 Q72 66, 93 70 L93 83 Q78 81, 62 89 Z" fill="${c('Shoulders')}" stroke="${ol}" stroke-width="0.4" ${c('Shoulders') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M138 76 Q128 66, 107 70 L107 83 Q122 81, 138 89 Z" fill="${c('Shoulders')}" stroke="${ol}" stroke-width="0.4" ${c('Shoulders') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Shoulders')}" x="184" y="78" text-anchor="end" font-size="6">SHLDR</text>
+      <!-- Upper Back -->
+      <path class="muscle-zone" d="M74 84 Q84 76, 100 78 Q116 76, 126 84 L126 142 Q116 148, 100 148 Q84 148, 74 142 Z" fill="${c('Upper Back')}" stroke="${ol}" stroke-width="0.4" ${c('Upper Back') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Upper Back')}" x="100" y="108" text-anchor="middle" font-size="6">UPPER</text>
+      <text class="${lc('Upper Back')}" x="100" y="116" text-anchor="middle" font-size="6">BACK</text>
+      <!-- Lower Back -->
+      <path class="muscle-zone" d="M84 148 L116 148 L114 180 Q106 186, 100 186 Q94 186, 86 180 Z" fill="${c('Lower Back')}" stroke="${ol}" stroke-width="0.4" ${c('Lower Back') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Lower Back')}" x="100" y="168" text-anchor="middle" font-size="5.5">LOWER</text>
+      <!-- Triceps -->
+      <path class="muscle-zone" d="M60 89 Q50 88, 46 106 L42 138 Q46 144, 52 140 L58 114 Q62 98, 60 89 Z" fill="${c('Triceps')}" stroke="${ol}" stroke-width="0.4" ${c('Triceps') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M140 89 Q150 88, 154 106 L158 138 Q154 144, 148 140 L142 114 Q138 98, 140 89 Z" fill="${c('Triceps')}" stroke="${ol}" stroke-width="0.4" ${c('Triceps') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Triceps')}" x="184" y="118" text-anchor="end" font-size="5.5">TRICEP</text>
+      <!-- Forearms -->
+      <path class="muscle-zone" d="M36 142 Q32 152, 28 174 L26 192 Q30 196, 34 192 L42 170 Q46 154, 44 142 Z" fill="${c('Forearms')}" stroke="${ol}" stroke-width="0.4" ${c('Forearms') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M164 142 Q168 152, 172 174 L174 192 Q170 196, 166 192 L158 170 Q154 154, 156 142 Z" fill="${c('Forearms')}" stroke="${ol}" stroke-width="0.4" ${c('Forearms') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <!-- Hands -->
+      <ellipse cx="25" cy="198" rx="5" ry="8" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <ellipse cx="175" cy="198" rx="5" ry="8" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <!-- Glutes -->
+      <path class="muscle-zone" d="M86 180 Q88 188, 100 192 Q112 188, 114 180 L114 202 Q106 210, 100 210 Q94 210, 86 202 Z" fill="${c('Glutes')}" stroke="${ol}" stroke-width="0.4" ${c('Glutes') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Glutes')}" x="100" y="198" text-anchor="middle" font-size="5.5">GLUTE</text>
+      <!-- Hamstrings (outline) -->
+      <path d="M86 202 Q84 226, 82 260 L80 296 Q86 302, 92 296 L95 250 Q99 216, 100 210 Q94 210, 86 202 Z" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <path d="M114 202 Q116 226, 118 260 L120 296 Q114 302, 108 296 L105 250 Q101 216, 100 210 Q106 210, 114 202 Z" fill="none" stroke="${ol}" stroke-width="0.4"/>
+      <!-- Calves -->
+      <path class="muscle-zone" d="M80 302 Q78 320, 76 350 L74 370 Q82 376, 88 370 L90 342 Q91 318, 92 302 Z" fill="${c('Calves')}" stroke="${ol}" stroke-width="0.4" ${c('Calves') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <path class="muscle-zone" d="M120 302 Q122 320, 124 350 L126 370 Q118 376, 112 370 L110 342 Q109 318, 108 302 Z" fill="${c('Calves')}" stroke="${ol}" stroke-width="0.4" ${c('Calves') !== HEATMAP_OUTLINE ? `filter="url(#${glowId})"` : ''}/>
+      <text class="${lc('Calves')}" x="100" y="345" text-anchor="middle" font-size="6">CALF</text>
+    </svg>`;
+}
+
+function renderHeatmap() {
+  const main = document.getElementById('content');
+  main.innerHTML = '';
+  destroyCharts();
+
+  const recency = calcGroupRecency();
+  const container = el(`<div class="heatmap-view"></div>`);
+
+  container.appendChild(el(`<h2>## body_heatmap</h2>`));
+
+  // Front + Back SVGs side by side
+  const bodyDiv = el(`<div class="heatmap-body-pair">
+    <div class="heatmap-body">${buildFrontSvg(recency)}</div>
+    <div class="heatmap-body">${buildBackSvg(recency)}</div>
+  </div>`);
+  container.appendChild(bodyDiv);
+
+  // Legend
+  container.appendChild(el(`<div class="heatmap-legend">
+    <div class="heatmap-legend-item"><div class="heatmap-legend-swatch" style="background:${HEATMAP_GREEN}"></div><span>worked</span></div>
+    <div class="heatmap-legend-item"><div class="heatmap-legend-swatch" style="background:${HEATMAP_PINK}"></div><span>resting</span></div>
+    <div class="heatmap-legend-item"><div class="heatmap-legend-swatch" style="background:${HEATMAP_OUTLINE};border-color:rgba(40,254,20,0.4)"></div><span>focus</span></div>
+  </div>`));
+
+  // Detail list
+  const detailDiv = el(`<div class="heatmap-detail"></div>`);
+  for (const group of HEATMAP_GROUPS) {
+    const daysAgo = recency[group];
+    const color = heatmapColor(daysAgo);
+    const status = heatmapStatusText(daysAgo);
+    detailDiv.appendChild(el(`
+      <div class="heatmap-detail-row">
+        <span class="group-name"><span class="group-swatch" style="background:${color}"></span>${group}</span>
+        <span class="group-status" style="color:${color}">${status}</span>
+      </div>
+    `));
+  }
+  container.appendChild(detailDiv);
+
+  main.appendChild(container);
+}
+
 function render() {
   document.getElementById('weekLabel').textContent = `week_${String(currentWeek).padStart(2, '0')}`;
   localStorage.setItem('lift_app_week', String(currentWeek));
-  if (currentDay === 'analytics') {
+  if (currentDay === 'heatmap') {
+    renderHeatmap();
+  } else if (currentDay === 'analytics') {
     renderAnalytics();
   } else if (currentDay === 'settings') {
     renderSettings();
@@ -4587,7 +5290,7 @@ document.querySelectorAll('#dayTabs button').forEach(btn => {
   });
 });
 
-// Double-tap the app title ($ ./lift-track-vibe) to reveal stats / sett
+// Single-tap the app title ($ ./lift-track-vibe) to reveal stats / sett
 (() => {
   const promptEl = document.getElementById('prompt');
   const menuEl = document.getElementById('appMenu');
@@ -4596,18 +5299,12 @@ document.querySelectorAll('#dayTabs button').forEach(btn => {
     menuEl.hidden = !open;
     document.body.classList.toggle('menu-open', open);
   };
-  let lastTap = 0;
   promptEl.addEventListener('click', () => {
-    const now = Date.now();
-    if (now - lastTap < 350) {
-      lastTap = 0;
-      setMenuOpen(menuEl.hidden);
-    } else {
-      lastTap = now;
-    }
+    setMenuOpen(menuEl.hidden);
   });
   menuEl.querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', (e) => {
+      e.stopPropagation();
       if (btn.disabled) { e.preventDefault(); return; }
       currentDay = btn.dataset.day;
       localStorage.setItem('lift_app_day', currentDay);
@@ -4616,6 +5313,8 @@ document.querySelectorAll('#dayTabs button').forEach(btn => {
       setMenuOpen(false);
     });
   });
+  // Stop clicks inside the menu from bubbling to the document close handler
+  menuEl.addEventListener('click', (e) => e.stopPropagation());
   // Tap anywhere outside the menu or prompt closes it
   document.addEventListener('click', (e) => {
     if (menuEl.hidden) return;
@@ -4651,6 +5350,22 @@ localStorage.setItem('lift_app_week', String(currentWeek));
 highlightTodayTab();
 setActiveTab(currentDay);
 render();
+
+// ─── Heatmap button ───
+document.getElementById('heatmapBtn').addEventListener('click', () => {
+  if (currentDay === 'heatmap') {
+    // Toggle back to previous day
+    currentDay = todayWeekdayKey();
+    document.getElementById('heatmapBtn').classList.remove('active');
+  } else {
+    currentDay = 'heatmap';
+    document.getElementById('heatmapBtn').classList.add('active');
+  }
+  localStorage.setItem('lift_app_day', currentDay);
+  setActiveTab(currentDay);
+  render();
+  document.getElementById('appMenu').hidden = true;
+});
 
 // ─── Service worker for offline / PWA + auto-update ───
 if ('serviceWorker' in navigator) {

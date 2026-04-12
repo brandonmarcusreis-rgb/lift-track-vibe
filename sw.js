@@ -1,4 +1,4 @@
-const CACHE = 'lift-app-v95';
+const CACHE = 'lift-app-v129';
 const ASSETS = [
   '/',
   '/index.html',
@@ -24,9 +24,14 @@ self.addEventListener('activate', e => {
   );
 });
 
-// Network-first: always try fresh, fall back to cache only when offline
+// Network-first: always try fresh, fall back to cache only when offline.
+// Skip external requests (GitHub API, etc) entirely so the SW doesn't
+// interfere with auth headers, body consumption, or CORS.
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  // Only handle same-origin requests (our own assets). Let external fetches pass through untouched.
+  if (url.origin !== self.location.origin) return;
   e.respondWith(
     fetch(e.request).then(resp => {
       const respClone = resp.clone();
