@@ -229,10 +229,24 @@ async function putContents(sha) {
   try { headers = { ...(await ghHeaders()), 'Content-Type': 'application/json' }; }
   catch (e) { throw new Error('headers: ' + (e.message || e)); }
   try {
+    // Also pull auxiliary localStorage keys that live outside of state
+    // (baseline manual overrides, heatmap tracking, unit, rest timer).
+    const prefs = {};
+    const PREF_KEYS = [
+      'lift_app_baseline_manual',
+      'lift_app_group_last_worked',
+      'lift_app_unit',
+      'lift_app_rest_timer_seconds',
+    ];
+    for (const k of PREF_KEYS) {
+      const v = localStorage.getItem(k);
+      if (v != null) prefs[k] = v;
+    }
     payload = JSON.stringify({
-      version: 1,
+      version: 2,
       saved_at: new Date().toISOString(),
       data: state,
+      prefs,
     }, null, 2);
   } catch (e) { throw new Error('json stringify: ' + (e.message || e)); }
   try { encoded = utf8ToBase64(payload); }
@@ -295,6 +309,12 @@ async function restoreFromGithub() {
     if (!ok) return;
     state = incoming;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    // Restore auxiliary prefs if present (v2+ backups)
+    if (parsed.prefs && typeof parsed.prefs === 'object') {
+      for (const k of Object.keys(parsed.prefs)) {
+        try { localStorage.setItem(k, parsed.prefs[k]); } catch {}
+      }
+    }
     render();
     alert('Restored from GitHub.');
   } catch (e) {
@@ -736,6 +756,91 @@ let state = loadState();
   if (changed) saveState();
 })();
 
+// Rebuild heatmap stamps from state whenever state has exercises that
+// aren't reflected in the group_last_worked map (e.g. after a JSON import).
+(function rebuildHeatmapFromState() {
+  try {
+    const map = JSON.parse(localStorage.getItem('lift_app_group_last_worked') || '{}');
+    const DAY_IDX = { monday: 0, tuesday: 1, wednesday: 2, thursday: 3, friday: 4, saturday: 5, sunday: 6 };
+    // Anchor: figure out week 1 Monday using ISO math
+    // Week N Monday for ISO: we can compute via the currentCalendarWeek helper but it's not defined yet.
+    // Inline the ISO week → Monday date calculation.
+    const thisYear = new Date().getFullYear();
+    function mondayOfWeek(yr, wk) {
+      // Jan 4 is always in ISO week 1
+      const jan4 = new Date(Date.UTC(yr, 0, 4));
+      const jan4DOW = jan4.getUTCDay() || 7; // 1-7 (Mon=1)
+      const week1Mon = new Date(jan4);
+      week1Mon.setUTCDate(jan4.getUTCDate() - jan4DOW + 1);
+      const d = new Date(week1Mon);
+      d.setUTCDate(d.getUTCDate() + (wk - 1) * 7);
+      return d;
+    }
+    for (const k of Object.keys(state)) {
+      const wk = parseInt(k, 10);
+      if (isNaN(wk) || wk < 1 || wk > 53) continue;
+      const weekData = state[k];
+      for (const day of Object.keys(weekData || {})) {
+        if (!(day in DAY_IDX)) continue;
+        const dayData = weekData[day];
+        if (!dayData || !dayData.exercises) continue;
+        // Determine the calendar date for this week+day
+        const monday = mondayOfWeek(thisYear, wk);
+        const d = new Date(monday);
+        d.setUTCDate(d.getUTCDate() + DAY_IDX[day]);
+        const dateStr = d.toISOString().slice(0, 10);
+        // Find which groups have activity on this day
+        const dayGroups = new Set();
+        const configExercises = state.exercises?.[day] || (typeof DAYS !== 'undefined' ? DAYS[day] : []) || [];
+        for (const name of Object.keys(dayData.exercises)) {
+          const ex = dayData.exercises[name];
+          const hasData = ex.completed || (ex.sets && ex.sets.some(s => (parseFloat(s.lbs) || 0) > 0 || (parseFloat(s.reps) || 0) > 0));
+          if (!hasData) continue;
+          const cfg = configExercises.find(c => c.name === name);
+          if (cfg && cfg.group) dayGroups.add(cfg.group);
+        }
+        for (const g of dayGroups) {
+          // normalize group inline
+          let grp = g;
+          if (grp === 'Back') grp = 'Upper Back';
+          if (grp === 'Legs') grp = 'Thighs';
+          if (!map[grp] || dateStr > map[grp]) map[grp] = dateStr;
+        }
+      }
+    }
+    localStorage.setItem('lift_app_group_last_worked', JSON.stringify(map));
+  } catch (e) { /* silent */ }
+})();
+
+// Purge all legacy [body] data — the section has been removed from the UI.
+(function purgeBodyData() {
+  let changed = false;
+  // Top-level body config
+  if (state.bodyActivities) { delete state.bodyActivities; changed = true; }
+  if (state.library && state.library.body) { delete state.library.body; changed = true; }
+  // Section order — remove 'body' entry if present
+  if (state.sections?.order && state.sections.order.includes('body')) {
+    state.sections.order = state.sections.order.filter(k => k !== 'body');
+    changed = true;
+  }
+  if (state.sections?.collapsed && 'body' in state.sections.collapsed) {
+    delete state.sections.collapsed.body;
+    changed = true;
+  }
+  if (state.analyticsCollapsed && 'body' in state.analyticsCollapsed) {
+    delete state.analyticsCollapsed.body;
+    changed = true;
+  }
+  // Per-week per-day body entries
+  for (const wk of Object.keys(state)) {
+    if (isNaN(parseInt(wk, 10))) continue;
+    for (const d of Object.keys(state[wk] || {})) {
+      if (state[wk][d]?.body) { delete state[wk][d].body; changed = true; }
+    }
+  }
+  if (changed) saveState();
+})();
+
 let currentWeek = parseInt(localStorage.getItem('lift_app_week') || '1', 10);
 
 // Auto-jump to today's weekday on first open of the day
@@ -754,11 +859,30 @@ function pickInitialDay() {
 }
 let currentDay = 'monday'; // overridden after DAYS + helpers defined
 
+// One-time cleanup: remove the old week anchor key now that we use calendar weeks
+try { localStorage.removeItem('lift_app_week_anchor'); } catch {}
+
+// ISO 8601 week of the year (1-53). Weeks start Monday.
+// Week 1 is the week containing the first Thursday of the year.
+// Today Apr 13, 2026 (Monday) = week 16.
 function currentCalendarWeek() {
   const now = new Date();
-  const oneJan = new Date(now.getFullYear(), 0, 1);
-  const dayNum = Math.ceil((now - oneJan + 1) / 86400000);
-  return Math.min(52, Math.ceil(dayNum / 7));
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  // Shift to Thursday of current week (ISO anchor)
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return Math.max(1, Math.min(53, weekNum));
+}
+
+// Monday helper (used elsewhere)
+function mondayOf(date) {
+  const d = new Date(date);
+  d.setHours(12, 0, 0, 0);
+  const dow = d.getDay();
+  const offset = dow === 0 ? -6 : 1 - dow;
+  d.setDate(d.getDate() + offset);
+  return d;
 }
 
 function exKey(name) {
@@ -1477,20 +1601,20 @@ function yesterdayDateStr() {
   return d.toISOString().slice(0, 10);
 }
 
-// Returns the calendar date for a given day-tab name in the current week.
-// e.g. if today is Wednesday 2026-04-15, dateForDayTab('monday') → '2026-04-13'
+// Returns the calendar date for a given day-tab name in the currently
+// viewed week. Dates always align Mon-Sun for the visible week; week
+// numbers are shifted by weekDiff relative to the current calendar week.
 function dateForDayTab(dayName) {
-  const dayIndex = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
+  const dayIndex = { monday: 0, tuesday: 1, wednesday: 2, thursday: 3, friday: 4, saturday: 5, sunday: 6 };
   const idx = dayIndex[dayName];
-  if (idx == null) return yesterdayDateStr(); // fallback
+  if (idx == null) return yesterdayDateStr();
   const now = new Date();
-  const todayIdx = now.getDay(); // 0=Sun
-  // Offset from today to the requested day within the same Mon–Sun week
-  const todayMondayBased = todayIdx === 0 ? 6 : todayIdx - 1; // 0=Mon
-  const targetMondayBased = idx === 0 ? 6 : idx - 1;          // 0=Mon
-  const diff = targetMondayBased - todayMondayBased;
+  now.setHours(12, 0, 0, 0);
+  const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1; // Monday=0
+  const week = typeof currentWeek === 'number' ? currentWeek : currentCalendarWeek();
+  const weekDiff = week - currentCalendarWeek();
   const d = new Date(now);
-  d.setDate(d.getDate() + diff);
+  d.setDate(d.getDate() + (idx - todayIdx) + weekDiff * 7);
   return d.toISOString().slice(0, 10);
 }
 
@@ -1822,6 +1946,133 @@ function enableTouchReorder(listEl, onReorder) {
   listEl.addEventListener('touchcancel', finishTouch);
 }
 
+// ─── Dashboard header: date/time + rest timer ───
+const REST_TIMER_KEY = 'lift_app_rest_timer_seconds';
+
+function getLastRestSeconds() {
+  return parseInt(localStorage.getItem(REST_TIMER_KEY) || '90', 10);
+}
+
+function setLastRestSeconds(n) {
+  localStorage.setItem(REST_TIMER_KEY, String(n));
+}
+
+function formatClock(date) {
+  const opts = { weekday: 'short', month: 'short', day: 'numeric' };
+  const dateStr = date.toLocaleDateString('en-US', opts).toLowerCase();
+  const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toLowerCase();
+  return { dateStr, timeStr };
+}
+
+function renderDashboardHeader(day) {
+  const header = el(`
+    <div class="dashboard-header">
+      <div class="dash-datetime">
+        <div class="dash-date" data-role="dash-date">—</div>
+        <div class="dash-time" data-role="dash-time">—</div>
+      </div>
+      <div class="dash-timer">
+        <div class="dash-timer-input-row">
+          <input type="number" inputmode="numeric" class="dash-timer-input" data-role="timer-seconds" value="${getLastRestSeconds()}" min="5" max="600">
+          <span class="dash-timer-unit">sec</span>
+        </div>
+        <div class="dash-timer-readout" data-role="timer-readout">ready</div>
+        <div class="dash-timer-buttons">
+          <button class="dash-timer-btn dash-timer-start" data-role="timer-start">start</button>
+          <button class="dash-timer-btn dash-timer-reset" data-role="timer-reset">reset</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  const dateEl = header.querySelector('[data-role="dash-date"]');
+  const timeEl = header.querySelector('[data-role="dash-time"]');
+  const tickClock = () => {
+    const { dateStr, timeStr } = formatClock(new Date());
+    dateEl.textContent = dateStr;
+    timeEl.textContent = timeStr;
+  };
+  tickClock();
+  const clockInterval = setInterval(tickClock, 1000);
+  // Stash interval on the node so it can be cleaned up if needed
+  header.dataset.clockInterval = String(clockInterval);
+
+  // Rest timer
+  const secondsInput = header.querySelector('[data-role="timer-seconds"]');
+  const readout = header.querySelector('[data-role="timer-readout"]');
+  const startBtn = header.querySelector('[data-role="timer-start"]');
+  const resetBtn = header.querySelector('[data-role="timer-reset"]');
+  let timerInterval = null;
+  let remaining = getLastRestSeconds();
+
+  const formatRemaining = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return m > 0 ? `${m}:${String(sec).padStart(2,'0')}` : `0:${String(sec).padStart(2,'0')}`;
+  };
+
+  const setRunning = (running) => {
+    header.classList.toggle('timer-running', running);
+    startBtn.textContent = running ? 'pause' : (remaining === 0 ? 'start' : 'start');
+    if (running) startBtn.classList.add('running'); else startBtn.classList.remove('running');
+  };
+
+  const stopTimer = () => {
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    setRunning(false);
+  };
+
+  const resetTimer = () => {
+    stopTimer();
+    const n = Math.max(5, parseInt(secondsInput.value, 10) || getLastRestSeconds());
+    remaining = n;
+    readout.textContent = formatRemaining(remaining);
+    header.classList.remove('timer-done');
+  };
+
+  const tickTimer = () => {
+    remaining--;
+    readout.textContent = formatRemaining(remaining);
+    if (remaining <= 0) {
+      stopTimer();
+      header.classList.add('timer-done');
+      readout.textContent = 'done';
+      if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+    }
+  };
+
+  const startTimer = () => {
+    if (timerInterval) {
+      // pause
+      stopTimer();
+      return;
+    }
+    const n = Math.max(5, parseInt(secondsInput.value, 10) || getLastRestSeconds());
+    setLastRestSeconds(n);
+    if (remaining <= 0 || header.classList.contains('timer-done')) {
+      remaining = n;
+      header.classList.remove('timer-done');
+    }
+    readout.textContent = formatRemaining(remaining);
+    setRunning(true);
+    timerInterval = setInterval(tickTimer, 1000);
+  };
+
+  startBtn.addEventListener('click', startTimer);
+  resetBtn.addEventListener('click', resetTimer);
+  secondsInput.addEventListener('change', () => {
+    const n = Math.max(5, parseInt(secondsInput.value, 10) || getLastRestSeconds());
+    setLastRestSeconds(n);
+    if (!timerInterval) {
+      remaining = n;
+      readout.textContent = formatRemaining(remaining);
+    }
+  });
+
+  readout.textContent = formatRemaining(remaining);
+  return header;
+}
+
 // ─── Water intake (14 cups / 7 drops × 2 cups each) ───
 const WATER_DROPS = 7;
 
@@ -1951,31 +2202,26 @@ function renderDay(day) {
     renderSupplementsRows(supplementsList, day);
   });
 
-  // ─── Water tracker (white) — sits above daily_tracking + macros ───
-  main.appendChild(renderWaterTracker(day));
+  // ─── Dashboard wrapper (date/time + rest timer at top) ───
+  const dashboard = el(`<div class="dashboard-section" data-block="dashboard"></div>`);
+  dashboard.appendChild(el(`<div class="dashboard-title">## your_dashboard</div>`));
+  dashboard.appendChild(renderDashboardHeader(day));
+  dashboard.appendChild(renderWaterTracker(day));
 
   const topSplit = el(`<div class="top-split"></div>`);
   topSplit.appendChild(habitsBlock);
   topSplit.appendChild(renderMacros(day));
-  main.appendChild(topSplit);
+  dashboard.appendChild(topSplit);
 
-  // ─── Baseline (cyan) — previous day's health data below ───
-  main.appendChild(renderBaseline(day));
+  dashboard.appendChild(renderBaseline(day));
+  main.appendChild(dashboard);
 
-  // ─── Collapsible sections (weight, body) in user-defined order ───
+  // ─── [weight] section ───
   const sectionsContainer = el(`<div class="sections-container"></div>`);
-  const sectionOrder = getSectionOrder();
-  for (const key of sectionOrder) {
-    if (key === 'weight') {
-      sectionsContainer.appendChild(buildWeightSection(day, exercises, prevWeek));
-    } else if (key === 'body') {
-      sectionsContainer.appendChild(buildBodySection(day));
-    }
-  }
+  sectionsContainer.appendChild(buildWeightSection(day, exercises, prevWeek));
   main.appendChild(sectionsContainer);
-  enableSectionDragReorder(sectionsContainer, day);
 
-  // ─── Daily totals (outside both sections) ───
+  // ─── Daily totals ───
   const totalsBlock = el(`
     <div class="daily-totals">
       <div class="volume-row" id="volRow">
@@ -1984,25 +2230,11 @@ function renderDay(day) {
           <span class="vol-arrow"></span><span class="vol-number">${displayVolume(calcDayVolume(currentWeek, day))} ${unitLabel()}</span>
         </span>
       </div>
-      <div class="volume-row" id="bodyKcalRow">
-        <span class="label">&gt;&gt; dailyBody_Kcal</span>
-        <span class="value">
-          <span class="vol-arrow"></span><span class="vol-number">${calcDayBodyKcal(currentWeek, day)} kcal</span>
-        </span>
-      </div>
-      <div class="volume-row" id="bodyMassRow">
-        <span class="label">&gt;&gt; dailyBody_Mass</span>
-        <span class="value">
-          <span class="vol-arrow"></span><span class="vol-number">${displayVolume(calcDayBodyMass(currentWeek, day))} ${unitLabel()}</span>
-        </span>
-      </div>
     </div>
   `);
   main.appendChild(totalsBlock);
   setTimeout(() => {
     updateVolumeRow(day);
-    updateBodyKcalRow(day);
-    updateBodyMassRow(day);
   }, 0);
 }
 
@@ -2224,52 +2456,76 @@ function buildWeightSection(day, exercises, prevWeek) {
       }
     });
     const setsDiv = card.querySelector('.sets');
-    for (let s = 0; s < SETS_PER_EX; s++) {
-      const set = getSet(currentWeek, day, ex.name, s);
-      const setEl = el(`
-        <div class="set">
-          <div class="set-label">~set_${s+1}</div>
-          <div class="input-group">
-            <input type="number" inputmode="decimal" placeholder="${unitLabel()}" value="${lbsToDisplay(set.lbs)}" data-field="lbs">
-            <div class="stepper-row">
-              <button class="stepper minus" data-delta="-1" data-target="lbs">−</button>
-              <button class="stepper plus" data-delta="1" data-target="lbs">+</button>
+    ensure(currentWeek, day, ex.name);
+    const renderSets = () => {
+      setsDiv.innerHTML = '';
+      const setsArr = state[currentWeek][day].exercises[ex.name].sets;
+      for (let s = 0; s < setsArr.length; s++) {
+        const set = setsArr[s];
+        const setEl = el(`
+          <div class="set">
+            <div class="set-label">~set_${s+1}</div>
+            <div class="input-group">
+              <input type="number" inputmode="decimal" placeholder="${unitLabel()}" value="${lbsToDisplay(set.lbs)}" data-field="lbs">
+              <div class="stepper-row">
+                <button class="stepper minus" data-delta="-1" data-target="lbs">−</button>
+                <button class="stepper plus" data-delta="1" data-target="lbs">+</button>
+              </div>
             </div>
-          </div>
-          <div class="input-group">
-            <input type="number" inputmode="decimal" placeholder="reps" value="${set.reps ?? ''}" data-field="reps">
-            <div class="stepper-row">
-              <button class="stepper minus" data-delta="-1" data-target="reps">−</button>
-              <button class="stepper plus" data-delta="1" data-target="reps">+</button>
+            <div class="input-group">
+              <input type="number" inputmode="decimal" placeholder="reps" value="${set.reps ?? ''}" data-field="reps">
+              <div class="stepper-row">
+                <button class="stepper minus" data-delta="-1" data-target="reps">−</button>
+                <button class="stepper plus" data-delta="1" data-target="reps">+</button>
+              </div>
             </div>
+            ${setsArr.length > 1 ? `<button class="set-remove" data-role="remove-set" aria-label="remove set">✕</button>` : ''}
           </div>
-        </div>
-      `);
-      const lbsIn = setEl.querySelector('input[data-field="lbs"]');
-      const repsIn = setEl.querySelector('input[data-field="reps"]');
-      lbsIn.addEventListener('input', e => {
-        setSetField(currentWeek, day, ex.name, s, 'lbs', displayToLbs(e.target.value));
-        updateVolumeRow(day);
-      });
-      repsIn.addEventListener('input', e => {
-        setSetField(currentWeek, day, ex.name, s, 'reps', e.target.value);
-        updateVolumeRow(day);
-      });
-      setEl.querySelectorAll('.stepper').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const delta = parseFloat(btn.dataset.delta);
-          const target = btn.dataset.target;
-          const input = setEl.querySelector(`input[data-field="${target}"]`);
-          const cur = parseFloat(input.value) || 0;
-          const next = Math.max(0, cur + delta);
-          input.value = next;
-          const toStore = target === 'lbs' ? displayToLbs(next) : String(next);
-          setSetField(currentWeek, day, ex.name, s, target, toStore);
+        `);
+        const lbsIn = setEl.querySelector('input[data-field="lbs"]');
+        const repsIn = setEl.querySelector('input[data-field="reps"]');
+        lbsIn.addEventListener('input', e => {
+          setSetField(currentWeek, day, ex.name, s, 'lbs', displayToLbs(e.target.value));
           updateVolumeRow(day);
         });
+        repsIn.addEventListener('input', e => {
+          setSetField(currentWeek, day, ex.name, s, 'reps', e.target.value);
+          updateVolumeRow(day);
+        });
+        setEl.querySelectorAll('.stepper').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const delta = parseFloat(btn.dataset.delta);
+            const target = btn.dataset.target;
+            const input = setEl.querySelector(`input[data-field="${target}"]`);
+            const cur = parseFloat(input.value) || 0;
+            const next = Math.max(0, cur + delta);
+            input.value = next;
+            const toStore = target === 'lbs' ? displayToLbs(next) : String(next);
+            setSetField(currentWeek, day, ex.name, s, target, toStore);
+            updateVolumeRow(day);
+          });
+        });
+        const removeBtn = setEl.querySelector('[data-role="remove-set"]');
+        if (removeBtn) {
+          removeBtn.addEventListener('click', () => {
+            state[currentWeek][day].exercises[ex.name].sets.splice(s, 1);
+            saveState();
+            renderSets();
+            updateVolumeRow(day);
+          });
+        }
+        setsDiv.appendChild(setEl);
+      }
+      // "+ set" button
+      const addBtn = el(`<button class="add-set-btn" data-role="add-set">+ add set</button>`);
+      addBtn.addEventListener('click', () => {
+        state[currentWeek][day].exercises[ex.name].sets.push({ lbs: '', reps: '' });
+        saveState();
+        renderSets();
       });
-      setsDiv.appendChild(setEl);
-    }
+      setsDiv.appendChild(addBtn);
+    };
+    renderSets();
     body.appendChild(card);
   });
 
@@ -2998,16 +3254,18 @@ function renderAnalytics() {
   `);
   main.appendChild(baselineContainer);
 
-  // Volume area chart: x = days, series = weeks (most recent 12)
-  const startWeek = Math.max(1, currentWeek - 11);
-  const weekRange = Array.from({length: Math.min(12, currentWeek)}, (_, i) => startWeek + i);
+  // Volume area chart: x = days, series = weeks (most recent 4)
+  const startWeek = Math.max(1, currentWeek - 3);
+  const weekRange = Array.from({length: Math.min(4, currentWeek)}, (_, i) => startWeek + i);
 
-  // Purple shades (pale → bright). Most recent week gets the brightest,
-  // matching the #A855F7 used by the weekly_volume_trend chart.
-  const PURPLE_SHADES = [
-    '#F3E8FF', '#EDE3FC', '#E7DAFB', '#E1D0F9',
-    '#D8B4FE', '#CCA5FC', '#C084FC', '#B878FB',
-    '#B370F9', '#AE67F8', '#AB5EF8', '#A855F7',
+  // Distinct colors per week — earlier weeks stack in front so later
+  // weeks are visible as they grow past them.
+  // Order: [oldest, 2nd, 3rd, newest]
+  const WEEK_COLORS = [
+    '#A855F7', // oldest — purple (drawn last/on top since earlier weeks should appear in front)
+    '#EC4899', // pink
+    '#F97316', // orange
+    '#FACC15', // newest — yellow (drawn first/behind)
   ];
 
   // Pre-compute weekly totals for the trend chart (sits in same row)
@@ -3022,7 +3280,7 @@ function renderAnalytics() {
 
   const volContainer = el(`
     <div class="chart-container" data-chart="volume-by-day">
-      <div class="section-title yellow">## volume_by_day [last_12_weeks]</div>
+      <div class="section-title yellow">## volume_by_day [last_4_weeks]</div>
       <div class="chart-wrapper"><canvas id="volChart"></canvas></div>
     </div>
   `);
@@ -3036,9 +3294,12 @@ function renderAnalytics() {
   `);
   chartRow.appendChild(volTrendContainer);
 
-  const volDatasets = weekRange.map((w, i) => {
-    const colorIdx = Math.max(0, PURPLE_SHADES.length - weekRange.length + i);
-    const color = PURPLE_SHADES[colorIdx];
+  // weekRange is [oldest, ..., newest]. Chart.js draws datasets in array order,
+  // so later-in-array renders ON TOP. We want OLDEST on top → reverse the order.
+  // Map colors: newest = WEEK_COLORS[3] (yellow), oldest = WEEK_COLORS[0] (purple).
+  const volDatasets = [...weekRange].reverse().map((w) => {
+    const ageFromNewest = weekRange[weekRange.length - 1] - w; // 0 for newest
+    const color = WEEK_COLORS[Math.min(ageFromNewest, WEEK_COLORS.length - 1)];
     return {
       label: `w${String(w).padStart(2,'0')}`,
       data: dayNames.map(d => calcDayVolume(w, d)),
@@ -3113,115 +3374,6 @@ function renderAnalytics() {
             font: { family: 'Menlo, monospace', size: 10 },
             boxWidth: 12,
           },
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 9 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-        y: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-      },
-    },
-  }));
-
-  // ── [body] analytics section: kcal by day + total weekly mass ──
-  const bodyAnalyticsSection = buildAnalyticsCollapsible('body', '## [body]');
-  const bodyChartRow = el(`<div class="chart-stack"></div>`);
-  bodyAnalyticsSection.querySelector('.section-body').appendChild(bodyChartRow);
-  main.appendChild(bodyAnalyticsSection);
-
-  const bodyKcalContainer = el(`
-    <div class="chart-container" data-chart="volume-by-day">
-      <div class="section-title yellow">## body_kcal_by_day [last_12_weeks]</div>
-      <div class="chart-wrapper"><canvas id="bodyKcalChart"></canvas></div>
-    </div>
-  `);
-  bodyChartRow.appendChild(bodyKcalContainer);
-
-  const bodyMassContainer = el(`
-    <div class="chart-container" data-chart="weekly-volume">
-      <div class="section-title yellow">## body_mass_trend</div>
-      <div class="chart-wrapper"><canvas id="bodyMassChart"></canvas></div>
-    </div>
-  `);
-  bodyChartRow.appendChild(bodyMassContainer);
-
-  const bodyKcalDatasets = weekRange.map((w, i) => {
-    const colorIdx = Math.max(0, PURPLE_SHADES.length - weekRange.length + i);
-    const color = PURPLE_SHADES[colorIdx];
-    return {
-      label: `w${String(w).padStart(2,'0')}`,
-      data: dayNames.map(d => calcDayBodyKcal(w, d)),
-      backgroundColor: color + '55',
-      borderColor: color,
-      borderWidth: 2,
-      fill: true,
-      tension: 0.3,
-      pointRadius: 3,
-      pointBackgroundColor: color,
-    };
-  });
-
-  chartInstances.push(new Chart(document.getElementById('bodyKcalChart'), {
-    type: 'line',
-    data: { labels: dayNames.map(d => d.slice(0,3)), datasets: bodyKcalDatasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          labels: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 }, boxWidth: 12 },
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 11 } },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-        y: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-      },
-    },
-  }));
-
-  const bodyMassTrendData = allWeeks.map(w =>
-    dayNames.reduce((sum, d) => sum + calcDayBodyMass(w, d), 0)
-  );
-
-  chartInstances.push(new Chart(document.getElementById('bodyMassChart'), {
-    type: 'line',
-    data: {
-      labels: sleepLabels,
-      datasets: [{
-        label: `total_${unitLabel()}`,
-        data: bodyMassTrendData,
-        borderColor: '#A855F7',
-        backgroundColor: 'rgba(168, 85, 247, 0.35)',
-        borderWidth: 2,
-        fill: true,
-        spanGaps: true,
-        tension: 0.3,
-        pointRadius: 3,
-        pointBackgroundColor: '#A855F7',
-        pointBorderColor: '#A855F7',
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          labels: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 }, boxWidth: 12 },
         },
       },
       scales: {
@@ -3537,6 +3689,58 @@ function renderSettings() {
   });
   ghBlock.querySelector('.btn-restore').addEventListener('click', restoreFromGithub);
 
+  // ── Clear cache (white, non-collapsible) ──
+  const cacheBlock = el(`
+    <div class="settings cache-quick" data-box="clear-cache">
+      <div class="cache-quick-row">
+        <div class="cache-quick-label">## clear_cache</div>
+        <button class="btn btn-clear-cache">$ clear_cache</button>
+      </div>
+      <div class="import-feedback" id="cacheFeedback" hidden></div>
+    </div>
+  `);
+  cacheBlock.querySelector('.btn-clear-cache').addEventListener('click', async () => {
+    const fb = document.getElementById('cacheFeedback');
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+      localStorage.removeItem(HEALTH_CACHE_KEY);
+      localStorage.removeItem(BASELINE_MANUAL_KEY);
+      localStorage.removeItem(GROUP_WORKED_KEY);
+      fb.hidden = false;
+      fb.className = 'import-feedback success';
+      fb.innerHTML = '<strong>done.</strong> cache cleared — reload to pull fresh files.';
+    } catch (e) {
+      showError('Clear cache failed', e.message || e);
+    }
+  });
+
+  // ── Import / Export (grouped JSON + CSV) ──
+  const importBlock = el(`
+    <div class="settings" data-box="import" id="importBlock">
+      <div class="section-title">## import // json + csv</div>
+      <div class="settings-help" style="margin-bottom:12px">
+        <strong>json:</strong> export a full snapshot or import a backup file. import <strong>replaces</strong> all current data.<br>
+        <strong>csv:</strong> import workouts from a spreadsheet. download the template first — it includes instructions, row format, and sample data. csv import <strong>merges</strong> with existing data; errors are reported by line/column and no data is written unless the entire file is valid.
+      </div>
+      <div class="settings-buttons">
+        <button class="btn btn-export">$ export_json</button>
+        <button class="btn btn-import">$ import_json</button>
+      </div>
+      <div class="settings-buttons" style="margin-top:8px">
+        <button class="btn btn-csv-template">$ download_csv_template</button>
+        <button class="btn btn-csv-import">$ import_csv</button>
+      </div>
+      <div class="import-feedback" id="importFeedback" hidden></div>
+    </div>
+  `);
+  importBlock.querySelector('.btn-export').addEventListener('click', exportData);
+  importBlock.querySelector('.btn-import').addEventListener('click', importData);
+  importBlock.querySelector('.btn-csv-template').addEventListener('click', downloadCSVTemplate);
+  importBlock.querySelector('.btn-csv-import').addEventListener('click', importCSVFile);
+
   // ── Danger zone (red) ──
   const dangerBlock = el(`
     <div class="settings" data-box="danger">
@@ -3551,14 +3755,17 @@ function renderSettings() {
   `);
   dangerBlock.querySelector('.btn-danger').addEventListener('click', clearAllData);
 
-  // Make each box collapsible, defaulting to collapsed on every render.
+  // Make all but cache collapsible (cache is a quick-action button, always visible)
   makeCollapsibleSettingsBox(ghBlock);
   makeCollapsibleSettingsBox(unitBlock);
+  makeCollapsibleSettingsBox(importBlock);
   makeCollapsibleSettingsBox(dangerBlock);
 
-  // Traffic-light order: green → yellow → red
+  // Order: clear_cache (white) → github (green) → unit (yellow) → import (blue) → danger (red)
+  main.appendChild(cacheBlock);
   main.appendChild(ghBlock);
   main.appendChild(unitBlock);
+  main.appendChild(importBlock);
   main.appendChild(dangerBlock);
   setTimeout(updateBackupStatus, 0);
 }
@@ -3583,10 +3790,22 @@ function makeCollapsibleSettingsBox(box) {
 
 // ─── Export / Import ───
 async function exportData() {
+  const prefs = {};
+  const PREF_KEYS = [
+    'lift_app_baseline_manual',
+    'lift_app_group_last_worked',
+    'lift_app_unit',
+    'lift_app_rest_timer_seconds',
+  ];
+  for (const k of PREF_KEYS) {
+    const v = localStorage.getItem(k);
+    if (v != null) prefs[k] = v;
+  }
   const payload = {
-    version: 1,
+    version: 2,
     exported_at: new Date().toISOString(),
     data: state,
+    prefs,
   };
   const json = JSON.stringify(payload, null, 2);
   const filename = `lift_app_backup_${new Date().toISOString().slice(0,10)}.json`;
@@ -3642,6 +3861,11 @@ function importData() {
         }
         state = incoming;
         saveState();
+        if (parsed && parsed.prefs && typeof parsed.prefs === 'object') {
+          for (const k of Object.keys(parsed.prefs)) {
+            try { localStorage.setItem(k, parsed.prefs[k]); } catch {}
+          }
+        }
         render();
         alert('Import successful.');
       } catch (err) {
@@ -3948,87 +4172,6 @@ function showImportFeedback(result) {
     }
     setTimeout(() => csvBlock.classList.remove('flash-error'), 1600);
   }
-}
-
-function renderImport() {
-  const main = document.getElementById('content');
-  main.innerHTML = '';
-  destroyCharts();
-
-  const jsonBlock = el(`
-    <div class="settings">
-      <div class="section-title">## json_backup // manual</div>
-      <div class="settings-help" style="margin-bottom:12px">
-        export a json snapshot of all state, or import a previous backup file.<br>
-        import <strong>replaces</strong> all current data — use with care.
-      </div>
-      <div class="settings-buttons">
-        <button class="btn btn-export">$ export_json</button>
-        <button class="btn btn-import">$ import_json</button>
-      </div>
-    </div>
-  `);
-  jsonBlock.querySelector('.btn-export').addEventListener('click', exportData);
-  jsonBlock.querySelector('.btn-import').addEventListener('click', importData);
-  main.appendChild(jsonBlock);
-
-  const csvBlock = el(`
-    <div class="settings" id="csvBlock">
-      <div class="section-title">## csv_import // spreadsheet</div>
-      <div class="settings-help" style="margin-bottom:12px">
-        import workouts and body activities from a spreadsheet. download the template first — it includes full instructions, the row format, and sample data covering a full week (with a rest day and a body activity).<br>
-        csv import <strong>merges</strong> with existing data. errors are reported by line/column and no data is written unless the entire file is valid.
-      </div>
-      <div class="settings-buttons">
-        <button class="btn btn-csv-template">$ download template</button>
-        <button class="btn btn-csv-import">$ import csv</button>
-      </div>
-      <div class="import-feedback" id="importFeedback" hidden></div>
-    </div>
-  `);
-  csvBlock.querySelector('.btn-csv-template').addEventListener('click', downloadCSVTemplate);
-  csvBlock.querySelector('.btn-csv-import').addEventListener('click', importCSVFile);
-  main.appendChild(csvBlock);
-
-  const cacheBlock = el(`
-    <div class="settings" id="cacheBlock">
-      <div class="section-title">## clear_cache // troubleshooting</div>
-      <div class="settings-help" style="margin-bottom:12px">
-        clears the service worker cache and cached health data so the app reloads fresh from the server on next visit. use this after a deploy if the app feels stuck on an old version or health baseline data looks stale.<br>
-        <strong>this does not delete your workout data, macros, habits, or backup config.</strong> it only removes:
-        <ul style="margin:6px 0 0 16px;padding:0;list-style:disc">
-          <li>service worker cached files (html, css, js)</li>
-          <li>cached health/baseline data from apple shortcuts</li>
-        </ul>
-        the app will re-fetch everything on next load.
-      </div>
-      <div class="settings-buttons">
-        <button class="btn btn-clear-cache">$ clear_cache</button>
-      </div>
-      <div class="import-feedback" id="cacheFeedback" hidden></div>
-    </div>
-  `);
-  cacheBlock.querySelector('.btn-clear-cache').addEventListener('click', async () => {
-    const fb = document.getElementById('cacheFeedback');
-    try {
-      // 1. Nuke all service worker caches
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-      // 2. Unregister the service worker so it re-installs fresh
-      const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(r => r.unregister()));
-      // 3. Clear cached health data
-      localStorage.removeItem(HEALTH_CACHE_KEY);
-      localStorage.removeItem(BASELINE_MANUAL_KEY);
-      localStorage.removeItem(GROUP_WORKED_KEY);
-      fb.hidden = false;
-      fb.className = 'import-feedback success';
-      fb.innerHTML = '<strong>done.</strong> cache cleared — reload the app to pull fresh files.';
-    } catch (e) {
-      showError('Clear cache failed', e.message || e);
-    }
-  });
-  main.appendChild(cacheBlock);
 }
 
 // ─── Calendar / Habit Tracker ───
@@ -4543,23 +4686,8 @@ function renderWalkthrough() {
       `,
     },
     {
-      title: '[body] section',
-      desc: 'yoga, cardio, and hiit log in kcal. resistance and bodyweight moves log mass × reps. both sections are collapsible and reorderable.',
-      preview: `
-        <div class="wt-box" style="border-color:var(--fg)">
-          <span style="color:var(--fg)">[body]</span><br>
-          <div style="margin-top:6px">
-            <span style="color:var(--fg-dim)">> yoga_flow</span> <span style="color:var(--fg-dim)">yoga</span> <span class="wt-mini-input" style="width:50px">250</span> <span style="color:var(--fg-dim)">kcal</span>
-          </div>
-          <div style="margin-top:4px">
-            <span style="color:var(--fg-dim)">> pull_up</span> <span style="color:var(--fg-dim)">calisthenics</span> <span class="wt-mini-input" style="width:40px">0</span> <span class="wt-mini-input" style="width:40px">12</span>
-          </div>
-        </div>
-      `,
-    },
-    {
       title: 'track your progress',
-      desc: 'the stats page shows pr evolution (week-over-week gains), macro trends, baseline health, and volume charts for both [weight] and [body]. tap any chart title to expand. rotate for landscape.',
+      desc: 'the stats page shows pr evolution (week-over-week gains), macro trends, baseline health, and volume charts. tap any chart title to expand. rotate for landscape.',
       preview: `
         <div class="wt-box" style="border-color:#AAA;background:rgba(200,200,200,0.1)">
           <span style="color:#FFF">## pr_evolution</span><br>
@@ -4815,26 +4943,12 @@ once configured, the app auto-commits every change to your repo (debounced 30s).
 <em>> library:</em> in the add modal's "from history" tab, swipe left on an exercise to hide it from the library. swipe right to pin it to the top. pinned items show a ★.`,
     },
     {
-      title: '## [body]_section',
-      body: `the green <strong>[body]</strong> collapsible section tracks bodyweight and cardio activities.
-
-<em>> two input types based on group:</em>
-• <strong>yoga, swimming, pilates, cardio, hiit, calisthenics</strong> → log in <strong>kcal</strong> (calories burned)
-• <strong>resistance, chest, back, shoulders</strong>, etc. → log <strong>mass</strong> (weight) and <strong>reps</strong>, like the weight section but labeled "mass"
-
-<em>> add / remove:</em> same flow as [weight] — green add button opens the modal with body-specific groups.
-
-<em>> reordering sections:</em> when both [weight] and [body] are collapsed, long-press a header and drag to swap their order. the order persists.`,
-    },
-    {
       title: '## daily_totals',
-      body: `three yellow summary boxes sit at the bottom of each day:
+      body: `a yellow summary box sits at the bottom of each day:
 
 • <strong>>> dailyWeight_Volume</strong> — total weight × reps across all [weight] exercises. shows a green ▲ or red ▼ arrow comparing to the same day last week.
-• <strong>>> dailyBody_Kcal</strong> — total kcal from [body] activities in kcal-based groups.
-• <strong>>> dailyBody_Mass</strong> — total mass × reps from [body] activities in mass-based groups.
 
-all volume/mass values respect the lb ↔ kg unit toggle in settings.`,
+values respect the lb ↔ kg unit toggle in settings.`,
     },
     {
       title: '## stats_analytics',
@@ -4846,9 +4960,7 @@ all volume/mass values respect the lb ↔ kg unit toggle in settings.`,
 
 <em>> baseline:</em> a grouped bar chart of sleep, steps, and stand as % of target (8 hrs, 10k steps, 12 hrs). data from your apple shortcuts health feed.
 
-<em>> [weight] reports:</em> collapsible section with volume-by-day (area chart, 12 weeks) and weekly-volume-trend (single purple line).
-
-<em>> [body] reports:</em> same structure — kcal-by-day and body-mass-trend.
+<em>> [weight] reports:</em> collapsible section with volume-by-day (4 weeks, color-coded) and weekly-volume-trend (single purple line).
 
 <em>> expanding charts:</em> tap any chart title to pop it out as a centered card over a blurred background. tap ✕ or the backdrop to close. pinch with two fingers to zoom in on details.
 
@@ -4917,15 +5029,11 @@ the import is atomic: if any row has an error, nothing is written. errors report
     },
     {
       title: '## tips_tricks',
-      body: `<em>> reorder sections:</em> collapse both [weight] and [body], then long-press one header and drag it over the other to swap.
-
-<em>> exercise library:</em> in the add modal "from history" tab, swipe left to permanently hide an exercise from the picker. swipe right to pin it to the top for quick access. re-adding a hidden exercise via the "new" tab brings it back.
+      body: `<em>> exercise library:</em> in the add modal "from history" tab, swipe left to permanently hide an exercise from the picker. swipe right to pin it to the top for quick access. re-adding a hidden exercise via the "new" tab brings it back.
 
 <em>> double-tap to complete:</em> double-tap any exercise header to mark the workout done. a rainbow sweeps diagonally across the card, then it collapses to a grey bar — protecting your logged data from accidental edits. double-tap the grey bar to reopen.
 
-<em>> baseline data:</em> baseline always shows yesterday's data (today reflects how you recovered before this workout). if apple shortcuts didn't run, manually type values in the baseline inputs.
-
-<em>> csv template:</em> the template includes a skipped saturday (rest day) and a body activity on sunday to show how the parser handles mixed row types and gaps.`,
+<em>> baseline data:</em> baseline always shows yesterday's data (today reflects how you recovered before this workout). if apple shortcuts didn't run, manually type values in the baseline inputs.`,
     },
   ];
 
@@ -5245,8 +5353,6 @@ function render() {
     renderAnalytics();
   } else if (currentDay === 'settings') {
     renderSettings();
-  } else if (currentDay === 'import') {
-    renderImport();
   } else if (currentDay === 'calendar') {
     renderCalendar();
   } else if (currentDay === 'knowledge') {
@@ -5265,12 +5371,12 @@ function highlightTodayTab() {
   document.querySelectorAll('#dayTabs button').forEach(btn => {
     const isToday = btn.dataset.day === todayKey;
     btn.classList.toggle('today', isToday);
-    if (isToday) {
-      if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-      btn.textContent = 'tdy';
-    } else if (btn.dataset.label) {
-      btn.textContent = btn.dataset.label;
-    }
+    const dayLabel = btn.dataset.day.slice(0, 3);
+    const label = isToday ? 'tdy' : dayLabel;
+    // Compute the date for this tab within the current week
+    const tabDate = dateForDayTab(btn.dataset.day);
+    const datePart = tabDate.slice(5); // "MM-DD"
+    btn.innerHTML = `<span class="day-label">${label}</span><span class="day-date">${datePart}</span>`;
   });
 }
 
@@ -5326,6 +5432,7 @@ document.querySelectorAll('#dayTabs button').forEach(btn => {
 document.getElementById('weekPrev').addEventListener('click', () => {
   if (currentWeek > 1) {
     currentWeek--;
+    highlightTodayTab();
     render();
   }
 });
@@ -5333,17 +5440,17 @@ document.getElementById('weekPrev').addEventListener('click', () => {
 document.getElementById('weekNext').addEventListener('click', () => {
   if (currentWeek < NUM_WEEKS) {
     currentWeek++;
+    highlightTodayTab();
     render();
   }
 });
 
-// Initial render: pick today / saved day, auto-set week, highlight today
-currentDay = pickInitialDay();
+// Initial render: always land on the current calendar week and today's day
+// (use arrows to navigate to past weeks if needed). This ensures dates under
+// day tabs always match the actual calendar week on launch.
+currentDay = todayWeekdayKey();
+currentWeek = currentCalendarWeek();
 const _todayDate = new Date().toISOString().slice(0, 10);
-const _lastVisit = localStorage.getItem('lift_app_last_visit');
-if (_lastVisit !== _todayDate) {
-  currentWeek = currentCalendarWeek();
-}
 localStorage.setItem('lift_app_last_visit', _todayDate);
 localStorage.setItem('lift_app_day', currentDay);
 localStorage.setItem('lift_app_week', String(currentWeek));
