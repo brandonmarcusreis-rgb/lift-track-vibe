@@ -95,7 +95,20 @@ function lbsToDisplay(lbs) {
   const n = parseFloat(lbs);
   if (isNaN(n)) return '';
   const displayN = getUnit() === 'kg' ? n * KG_PER_LB : n;
-  return String(Math.round(displayN * 10) / 10);
+  return String(Math.round(displayN));
+}
+
+function lbsToAlt(lbs) {
+  // Returns the value in the OTHER unit (for side-by-side display)
+  if (lbs === '' || lbs == null) return '';
+  const n = parseFloat(lbs);
+  if (isNaN(n)) return '';
+  const altN = getUnit() === 'kg' ? n : n * KG_PER_LB;
+  return String(Math.round(altN));
+}
+
+function altUnitLabel() {
+  return getUnit() === 'kg' ? 'lbs' : 'kg';
 }
 
 function displayToLbs(display) {
@@ -110,6 +123,13 @@ function displayVolume(lbs) {
   const n = parseFloat(lbs) || 0;
   const displayN = getUnit() === 'kg' ? n * KG_PER_LB : n;
   return fmtNum(Math.round(displayN));
+}
+
+function altVolume(lbs) {
+  // Volume in the OTHER unit
+  const n = parseFloat(lbs) || 0;
+  const altN = getUnit() === 'kg' ? n : n * KG_PER_LB;
+  return fmtNum(Math.round(altN));
 }
 
 function getBackupCfg() {
@@ -1667,7 +1687,10 @@ function copyPrevWeekSets(day, exName) {
     reps: s.reps || '',
   }));
   saveState();
-  renderDay(day);
+  const savedScroll = window.scrollY;
+  renderDay(day, { preserveScroll: true });
+  // Restore scroll after the render
+  window.scrollTo({ top: savedScroll, behavior: 'instant' });
 }
 
 function computePRs() {
@@ -1964,22 +1987,62 @@ function formatClock(date) {
   return { dateStr, timeStr };
 }
 
+// Flashes a rainbow overlay across the screen for one beat.
+// Used in the final 5-second countdown of the rest timer.
+function triggerScreenFlash() {
+  let overlay = document.getElementById('rainbow-flash-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'rainbow-flash-overlay';
+    document.body.appendChild(overlay);
+  }
+  // Restart the animation
+  overlay.classList.remove('flashing');
+  void overlay.offsetWidth; // force reflow
+  overlay.classList.add('flashing');
+}
+
 function renderDashboardHeader(day) {
+  const PRESETS = [30, 60, 90, 120, 180];
   const header = el(`
     <div class="dashboard-header">
       <div class="dash-datetime">
-        <div class="dash-date" data-role="dash-date">—</div>
-        <div class="dash-time" data-role="dash-time">—</div>
+        <div class="dash-datetime-top">
+          <div class="dash-date" data-role="dash-date">—</div>
+          <div class="dash-time" data-role="dash-time">—</div>
+          <button class="dash-pill dash-pill-tracking" data-role="open-tracking">
+            <span class="dash-pill-dot"></span>daily_tracking
+          </button>
+        </div>
+        <div class="dash-datetime-bottom">
+          <button class="dash-macros-box" data-role="open-macros" aria-label="open macros">
+            <div class="dash-macros-label">## macros</div>
+            <div class="dash-macros-row">
+              <div class="dash-macros-cell"><span class="dash-macros-key">p</span><span class="dash-macros-val" data-macro-val="protein">—</span></div>
+              <div class="dash-macros-cell"><span class="dash-macros-key">c</span><span class="dash-macros-val" data-macro-val="carb">—</span></div>
+              <div class="dash-macros-cell"><span class="dash-macros-key">f</span><span class="dash-macros-val" data-macro-val="fat">—</span></div>
+              <div class="dash-macros-cell"><span class="dash-macros-key">fb</span><span class="dash-macros-val" data-macro-val="fiber">—</span></div>
+            </div>
+          </button>
+        </div>
       </div>
       <div class="dash-timer">
-        <div class="dash-timer-input-row">
-          <input type="number" inputmode="numeric" class="dash-timer-input" data-role="timer-seconds" value="${getLastRestSeconds()}" min="5" max="600">
-          <span class="dash-timer-unit">sec</span>
+        <div class="timer-ring-wrapper">
+          <svg class="timer-ring" viewBox="0 0 100 100">
+            <circle class="timer-ring-bg" cx="50" cy="50" r="45"/>
+            <circle class="timer-ring-fg" cx="50" cy="50" r="45" data-role="ring-fg"/>
+          </svg>
+          <button class="timer-ring-center" data-role="timer-toggle" aria-label="start timer">
+            <span class="timer-readout" data-role="timer-readout">0:90</span>
+            <span class="timer-label" data-role="timer-label" data-state="idle"></span>
+          </button>
         </div>
-        <div class="dash-timer-readout" data-role="timer-readout">ready</div>
-        <div class="dash-timer-buttons">
-          <button class="dash-timer-btn dash-timer-start" data-role="timer-start">start</button>
-          <button class="dash-timer-btn dash-timer-reset" data-role="timer-reset">reset</button>
+        <div class="timer-steppers">
+          <button class="timer-stepper" data-role="timer-minus" aria-label="minus 15">−15</button>
+          <button class="timer-stepper" data-role="timer-plus" aria-label="plus 15">+15</button>
+        </div>
+        <div class="timer-presets">
+          ${PRESETS.map(s => `<button class="timer-preset" data-preset="${s}">${s >= 60 ? (s/60 % 1 === 0 ? `${s/60}m` : `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`) : s+'s'}</button>`).join('')}
         </div>
       </div>
     </div>
@@ -1994,82 +2057,151 @@ function renderDashboardHeader(day) {
   };
   tickClock();
   const clockInterval = setInterval(tickClock, 1000);
-  // Stash interval on the node so it can be cleaned up if needed
   header.dataset.clockInterval = String(clockInterval);
 
-  // Rest timer
-  const secondsInput = header.querySelector('[data-role="timer-seconds"]');
+  // Populate macro summary values from state
+  const macroVals = header.querySelectorAll('[data-macro-val]');
+  macroVals.forEach(node => {
+    const field = node.dataset.macroVal;
+    const v = getMacro(currentWeek, day, field);
+    node.textContent = v ? v + 'g' : '—';
+  });
+
   const readout = header.querySelector('[data-role="timer-readout"]');
-  const startBtn = header.querySelector('[data-role="timer-start"]');
-  const resetBtn = header.querySelector('[data-role="timer-reset"]');
+  const label = header.querySelector('[data-role="timer-label"]');
+  const ringFg = header.querySelector('[data-role="ring-fg"]');
+  const toggleBtn = header.querySelector('[data-role="timer-toggle"]');
+  const minusBtn = header.querySelector('[data-role="timer-minus"]');
+  const plusBtn = header.querySelector('[data-role="timer-plus"]');
+  const presetBtns = header.querySelectorAll('.timer-preset');
+
+  const RING_CIRCUMFERENCE = 2 * Math.PI * 45; // r=45 in 100x100 viewBox
+  ringFg.style.strokeDasharray = String(RING_CIRCUMFERENCE);
+  ringFg.style.strokeDashoffset = '0';
+
   let timerInterval = null;
-  let remaining = getLastRestSeconds();
+  let target = getLastRestSeconds(); // what the user last used (for the ring fill)
+  let remaining = target;
 
   const formatRemaining = (s) => {
     const m = Math.floor(s / 60);
     const sec = s % 60;
-    return m > 0 ? `${m}:${String(sec).padStart(2,'0')}` : `0:${String(sec).padStart(2,'0')}`;
+    return `${m}:${String(sec).padStart(2,'0')}`;
   };
 
-  const setRunning = (running) => {
-    header.classList.toggle('timer-running', running);
-    startBtn.textContent = running ? 'pause' : (remaining === 0 ? 'start' : 'start');
-    if (running) startBtn.classList.add('running'); else startBtn.classList.remove('running');
+  const paintRing = () => {
+    const progress = target > 0 ? Math.max(0, Math.min(1, remaining / target)) : 1;
+    ringFg.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - progress));
   };
 
+  const updatePresetHighlight = () => {
+    presetBtns.forEach(b => {
+      b.classList.toggle('active', parseInt(b.dataset.preset, 10) === target);
+    });
+  };
+
+  const setLabel = (state) => { label.dataset.state = state; };
   const stopTimer = () => {
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-    setRunning(false);
+    header.classList.remove('timer-running');
+    setLabel('idle');
   };
 
-  const resetTimer = () => {
-    stopTimer();
-    const n = Math.max(5, parseInt(secondsInput.value, 10) || getLastRestSeconds());
-    remaining = n;
-    readout.textContent = formatRemaining(remaining);
-    header.classList.remove('timer-done');
-  };
-
-  const tickTimer = () => {
+  const tick = () => {
     remaining--;
     readout.textContent = formatRemaining(remaining);
+    paintRing();
+    // Last-5-second rainbow flash + haptic
+    if (remaining > 0 && remaining <= 5) {
+      triggerScreenFlash();
+      if (navigator.vibrate) navigator.vibrate(40);
+    }
     if (remaining <= 0) {
-      stopTimer();
+      clearInterval(timerInterval);
+      timerInterval = null;
+      header.classList.remove('timer-running');
       header.classList.add('timer-done');
       readout.textContent = 'done';
-      if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+      setLabel('done');
+      if (navigator.vibrate) navigator.vibrate([140, 80, 140, 80, 200]);
     }
   };
 
   const startTimer = () => {
-    if (timerInterval) {
-      // pause
-      stopTimer();
+    if (header.classList.contains('timer-done')) {
+      // reset to target
+      remaining = target;
+      header.classList.remove('timer-done');
+      readout.textContent = formatRemaining(remaining);
+      paintRing();
+      setLabel('idle');
       return;
     }
-    const n = Math.max(5, parseInt(secondsInput.value, 10) || getLastRestSeconds());
-    setLastRestSeconds(n);
-    if (remaining <= 0 || header.classList.contains('timer-done')) {
-      remaining = n;
+    if (timerInterval) {
+      // pause
+      clearInterval(timerInterval);
+      timerInterval = null;
+      header.classList.remove('timer-running');
+      setLabel('idle');
+      return;
+    }
+    header.classList.add('timer-running');
+    setLabel('running');
+    timerInterval = setInterval(tick, 1000);
+  };
+
+  const setTarget = (n, keepRemaining = false) => {
+    target = Math.max(5, Math.min(3600, n));
+    setLastRestSeconds(target);
+    if (!keepRemaining) {
+      remaining = target;
       header.classList.remove('timer-done');
     }
     readout.textContent = formatRemaining(remaining);
-    setRunning(true);
-    timerInterval = setInterval(tickTimer, 1000);
+    paintRing();
+    updatePresetHighlight();
+    setLabel(timerInterval ? 'running' : 'idle');
   };
 
-  startBtn.addEventListener('click', startTimer);
-  resetBtn.addEventListener('click', resetTimer);
-  secondsInput.addEventListener('change', () => {
-    const n = Math.max(5, parseInt(secondsInput.value, 10) || getLastRestSeconds());
-    setLastRestSeconds(n);
-    if (!timerInterval) {
-      remaining = n;
+  let lastToggleTap = 0;
+  toggleBtn.addEventListener('click', () => {
+    const now = Date.now();
+    if (now - lastToggleTap < 350) {
+      // Double-tap → reset
+      lastToggleTap = 0;
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      header.classList.remove('timer-running', 'timer-done');
+      remaining = target;
       readout.textContent = formatRemaining(remaining);
+      paintRing();
+      setLabel('idle');
+      if (navigator.vibrate) navigator.vibrate(15);
+      return;
     }
+    lastToggleTap = now;
+    startTimer();
+  });
+  minusBtn.addEventListener('click', () => {
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; header.classList.remove('timer-running'); }
+    setTarget(target - 15);
+  });
+  plusBtn.addEventListener('click', () => {
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; header.classList.remove('timer-running'); }
+    setTarget(target + 15);
+  });
+  presetBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      header.classList.remove('timer-done');
+      setTarget(parseInt(btn.dataset.preset, 10));
+      // Auto-start when tapping a preset chip
+      startTimer();
+    });
   });
 
   readout.textContent = formatRemaining(remaining);
+  paintRing();
+  updatePresetHighlight();
   return header;
 }
 
@@ -2172,14 +2304,62 @@ function renderWaterTracker(day) {
   return block;
 }
 
-function renderDay(day) {
+// Modal popover for a dashboard sub-block (daily tracking, macros, etc.)
+function openDashboardModal(titleText, bodyEl, accentColor) {
+  document.querySelectorAll('.tracking-modal-backdrop').forEach(n => n.remove());
+  const color = accentColor || 'var(--yellow)';
+  const backdrop = el(`
+    <div class="tracking-modal-backdrop">
+      <div class="tracking-modal" style="border-color:${color};box-shadow:0 0 0 1px ${color}26, 0 10px 40px rgba(0,0,0,0.6)">
+        <div class="tracking-modal-body"></div>
+      </div>
+    </div>
+  `);
+  backdrop.querySelector('.tracking-modal-body').appendChild(bodyEl);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) close();
+  });
+  document.body.appendChild(backdrop);
+}
+
+// Tap the box's h2 title to collapse/expand its content (no extra wrapper).
+const DASHBOARD_COLLAPSED_KEY = 'lift_app_dashboard_collapsed';
+function getDashboardCollapsed() {
+  try { return JSON.parse(localStorage.getItem(DASHBOARD_COLLAPSED_KEY)) || {}; }
+  catch { return {}; }
+}
+function setDashboardCollapsed(map) {
+  localStorage.setItem(DASHBOARD_COLLAPSED_KEY, JSON.stringify(map));
+}
+function wireSelfCollapse(block, key) {
+  const title = block.querySelector('h2');
+  if (!title) return;
+  const map = getDashboardCollapsed();
+  const startCollapsed = !!map[key];
+  block.classList.add('self-collapsible');
+  if (startCollapsed) block.classList.add('collapsed');
+  title.style.cursor = 'pointer';
+  title.addEventListener('click', (e) => {
+    // Avoid collapsing when tapping inline buttons/inputs inside the title
+    if (e.target.closest('button, input')) return;
+    const nowCollapsed = !block.classList.contains('collapsed');
+    block.classList.toggle('collapsed', nowCollapsed);
+    const saved = getDashboardCollapsed();
+    saved[key] = nowCollapsed;
+    setDashboardCollapsed(saved);
+  });
+}
+
+function renderDay(day, opts = {}) {
   const exercises = getExercisesForDay(day);
   const main = document.getElementById('content');
   main.innerHTML = '';
-  // Scroll to top whenever we render a day so the water/macros/baseline
-  // snapshot is always in view regardless of screen size.
-  window.scrollTo({ top: 0, behavior: 'instant' });
-  main.scrollTop = 0;
+  if (!opts.preserveScroll) {
+    // Scroll to top on fresh day loads so the dashboard is visible first
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    main.scrollTop = 0;
+  }
   const prevWeek = currentWeek - 1;
 
   // ─── Top split: daily_tracking (yellow) + macros (orange) ───
@@ -2202,37 +2382,59 @@ function renderDay(day) {
     renderSupplementsRows(supplementsList, day);
   });
 
-  // ─── Dashboard wrapper (date/time + rest timer at top) ───
+  // ─── Dashboard wrapper (date/time + rest timer at top — NOT collapsible) ───
   const dashboard = el(`<div class="dashboard-section" data-block="dashboard"></div>`);
   dashboard.appendChild(el(`<div class="dashboard-title">## your_dashboard</div>`));
   dashboard.appendChild(renderDashboardHeader(day));
+
+  // Water tracker — always visible
   dashboard.appendChild(renderWaterTracker(day));
 
-  const topSplit = el(`<div class="top-split"></div>`);
-  topSplit.appendChild(habitsBlock);
-  topSplit.appendChild(renderMacros(day));
-  dashboard.appendChild(topSplit);
+  const baselineBlock = renderBaseline(day);
+  dashboard.appendChild(baselineBlock);
+  wireSelfCollapse(baselineBlock, 'habits_baseline');
 
-  dashboard.appendChild(renderBaseline(day));
+  // Wire up the daily_tracking pill → pops modal with the habits block
+  const trackingPill = dashboard.querySelector('[data-role="open-tracking"]');
+  if (trackingPill) {
+    trackingPill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDashboardModal('## daily_tracking', habitsBlock, 'var(--yellow)');
+    });
+  }
+
+  // Wire up the macros summary box → pops modal with the full macros editor
+  const macrosSummary = dashboard.querySelector('[data-role="open-macros"]');
+  if (macrosSummary) {
+    macrosSummary.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const macrosBlock = renderMacros(day);
+      openDashboardModal('## macros', macrosBlock, 'var(--orange)');
+    });
+  }
   main.appendChild(dashboard);
+
+  // ─── Daily totals (sits above [weight] section) ───
+  const vol = calcDayVolume(currentWeek, day);
+  const totalsBlock = el(`
+    <div class="daily-totals">
+      <div class="volume-row" id="volRow">
+        <span class="label">&gt;&gt; dailyWeight_Volume</span>
+        <span class="value">
+          <span class="vol-arrow"></span>
+          <span class="vol-number">${displayVolume(vol)} ${unitLabel()}</span>
+          <span class="vol-alt-chip">${altVolume(vol)} ${altUnitLabel()}</span>
+        </span>
+      </div>
+    </div>
+  `);
+  main.appendChild(totalsBlock);
 
   // ─── [weight] section ───
   const sectionsContainer = el(`<div class="sections-container"></div>`);
   sectionsContainer.appendChild(buildWeightSection(day, exercises, prevWeek));
   main.appendChild(sectionsContainer);
 
-  // ─── Daily totals ───
-  const totalsBlock = el(`
-    <div class="daily-totals">
-      <div class="volume-row" id="volRow">
-        <span class="label">&gt;&gt; dailyWeight_Volume</span>
-        <span class="value">
-          <span class="vol-arrow"></span><span class="vol-number">${displayVolume(calcDayVolume(currentWeek, day))} ${unitLabel()}</span>
-        </span>
-      </div>
-    </div>
-  `);
-  main.appendChild(totalsBlock);
   setTimeout(() => {
     updateVolumeRow(day);
   }, 0);
@@ -2479,14 +2681,21 @@ function buildWeightSection(day, exercises, prevWeek) {
                 <button class="stepper plus" data-delta="1" data-target="reps">+</button>
               </div>
             </div>
+            <div class="set-alt-chip" data-role="alt-unit">${set.lbs ? lbsToAlt(set.lbs) + ' ' + altUnitLabel() : '—'}</div>
             ${setsArr.length > 1 ? `<button class="set-remove" data-role="remove-set" aria-label="remove set">✕</button>` : ''}
           </div>
         `);
         const lbsIn = setEl.querySelector('input[data-field="lbs"]');
         const repsIn = setEl.querySelector('input[data-field="reps"]');
+        const altEl = setEl.querySelector('[data-role="alt-unit"]');
+        const refreshAlt = () => {
+          const stored = state[currentWeek][day].exercises[ex.name].sets[s].lbs;
+          altEl.textContent = stored ? lbsToAlt(stored) + ' ' + altUnitLabel() : '—';
+        };
         lbsIn.addEventListener('input', e => {
           setSetField(currentWeek, day, ex.name, s, 'lbs', displayToLbs(e.target.value));
           updateVolumeRow(day);
+          refreshAlt();
         });
         repsIn.addEventListener('input', e => {
           setSetField(currentWeek, day, ex.name, s, 'reps', e.target.value);
@@ -2503,6 +2712,7 @@ function buildWeightSection(day, exercises, prevWeek) {
             const toStore = target === 'lbs' ? displayToLbs(next) : String(next);
             setSetField(currentWeek, day, ex.name, s, target, toStore);
             updateVolumeRow(day);
+            if (target === 'lbs') refreshAlt();
           });
         });
         const removeBtn = setEl.querySelector('[data-role="remove-set"]');
@@ -2669,6 +2879,8 @@ function updateVolumeRow(day) {
   const v = calcDayVolume(currentWeek, day);
   const numEl = document.querySelector('#volRow .vol-number');
   if (numEl) numEl.textContent = `${displayVolume(v)} ${unitLabel()}`;
+  const altEl = document.querySelector('#volRow .vol-alt-chip');
+  if (altEl) altEl.textContent = `${altVolume(v)} ${altUnitLabel()}`;
   const arrowEl = document.querySelector('#volRow .vol-arrow');
   if (arrowEl) {
     const dir = volumeTrendDirection(day);
@@ -3117,11 +3329,58 @@ function renderAnalytics() {
   // ── Macros row: averages (left) + stacked chart (right) ──
   const macroOrder = ['protein', 'fiber', 'carb', 'fat'];
   const macroBarColors = {
-    protein: '#1E3A8A',
-    fiber:   '#2563EB',
-    carb:    '#60A5FA',
-    fat:     '#93C5FD',
+    protein: '#1E3A8A', // deep navy
+    fiber:   '#3B82F6', // royal blue
+    carb:    '#60A5FA', // sky
+    fat:     '#BFDBFE', // powder
   };
+  // Pattern fills so each macro is visually distinct beyond just hue
+  const macroPatternStyles = {
+    protein: 'solid',
+    carb:    'diagonal',
+    fat:     'dots',
+    fiber:   'diamonds',
+  };
+  function makeMacroPattern(color, style) {
+    const c = document.createElement('canvas');
+    c.width = 12; c.height = 12;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 12, 12);
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 1.5;
+    if (style === 'diagonal') {
+      ctx.beginPath();
+      ctx.moveTo(0, 12); ctx.lineTo(12, 0);
+      ctx.moveTo(-3, 9); ctx.lineTo(9, -3);
+      ctx.moveTo(3, 15); ctx.lineTo(15, 3);
+      ctx.stroke();
+    } else if (style === 'dots') {
+      ctx.beginPath();
+      ctx.arc(3, 3, 1.5, 0, Math.PI * 2);
+      ctx.arc(9, 9, 1.5, 0, Math.PI * 2);
+      ctx.arc(9, 3, 1.5, 0, Math.PI * 2);
+      ctx.arc(3, 9, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (style === 'diamonds') {
+      const drawDiamond = (cx, cy, r) => {
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - r);
+        ctx.lineTo(cx + r, cy);
+        ctx.lineTo(cx, cy + r);
+        ctx.lineTo(cx - r, cy);
+        ctx.closePath();
+        ctx.stroke();
+      };
+      drawDiamond(6, 6, 3);
+      drawDiamond(0, 0, 2);
+      drawDiamond(12, 0, 2);
+      drawDiamond(0, 12, 2);
+      drawDiamond(12, 12, 2);
+    }
+    return ctx.createPattern(c, 'repeat');
+  }
   const trendYellow = '#FFFF55';
   const trendStyles = {
     protein: { borderDash: [],     pointStyle: 'circle',  pointRadius: 0 },
@@ -3233,22 +3492,19 @@ function renderAnalytics() {
   const baselineData = { sleep: [], steps: [], stand: [] };
   for (const d of baselineDates) {
     const entry = health[d] || {};
-    const sleepPct = entry.sleep_hrs != null
-      ? Math.round((Number(entry.sleep_hrs) / SLEEP_TARGET) * 100) : 0;
-    const stepsPct = entry.steps != null
-      ? Math.round((Number(entry.steps) / STEPS_TARGET) * 100) : 0;
-    const standPct = entry.stand_hrs != null
-      ? Math.round((Number(entry.stand_hrs) / STAND_TARGET) * 100) : 0;
-    if (sleepPct + stepsPct + standPct === 0) continue;
+    const sleepHrs = entry.sleep_hrs != null ? Number(entry.sleep_hrs) : 0;
+    const steps = entry.steps != null ? Number(entry.steps) : 0;
+    const standHrs = entry.stand_hrs != null ? Number(entry.stand_hrs) : 0;
+    if (sleepHrs + steps + standHrs === 0) continue;
     baselineLabels.push(d.slice(5));
-    baselineData.sleep.push(sleepPct);
-    baselineData.steps.push(stepsPct);
-    baselineData.stand.push(standPct);
+    baselineData.sleep.push(Math.round(sleepHrs * 10) / 10);
+    baselineData.steps.push(Math.round(steps / 1000 * 10) / 10); // show thousands
+    baselineData.stand.push(Math.round(standHrs));
   }
 
   const baselineContainer = el(`
     <div class="chart-container" data-chart="baseline">
-      <div class="section-title pink">## baseline [% of target]</div>
+      <div class="section-title pink">## baseline [hrs · 1k steps · hrs]</div>
       <div class="chart-wrapper" style="height:260px"><canvas id="baselineChart"></canvas></div>
     </div>
   `);
@@ -3324,6 +3580,7 @@ function renderAnalytics() {
       maintainAspectRatio: false,
       plugins: {
         legend: {
+          reverse: true,
           labels: {
             color: '#FFFF55',
             font: { family: 'Menlo, monospace', size: 10 },
@@ -3443,7 +3700,14 @@ function renderAnalytics() {
           align: 'end',
           color: '#FFAFCC',
           font: { family: 'Menlo, monospace', size: 8, weight: '600' },
-          formatter: (v) => v > 0 ? v + '%' : '',
+          formatter: (v, ctx) => {
+            if (!v) return '';
+            const label = ctx.dataset.label;
+            if (label === 'sleep') return v + 'h';
+            if (label === 'steps') return v + 'k';
+            if (label === 'stand') return v + 'h';
+            return String(v);
+          },
           offset: -2,
         },
       },
@@ -3455,7 +3719,7 @@ function renderAnalytics() {
         },
         y: {
           beginAtZero: true,
-          ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 9 }, callback: (v) => v + '%' },
+          ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 9 } },
           grid: { color: 'rgba(255,175,204,0.1)', lineWidth: 1 },
           border: { color: 'rgba(255,175,204,0.3)' },
         },
@@ -3475,17 +3739,14 @@ function renderAnalytics() {
     const freshData = { sleep: [], steps: [], stand: [] };
     for (const d of baselineDates) {
       const entry = freshHealth[d] || {};
-      const sleepPct = entry.sleep_hrs != null
-        ? Math.round((Number(entry.sleep_hrs) / SLEEP_TARGET) * 100) : 0;
-      const stepsPct = entry.steps != null
-        ? Math.round((Number(entry.steps) / STEPS_TARGET) * 100) : 0;
-      const standPct = entry.stand_hrs != null
-        ? Math.round((Number(entry.stand_hrs) / STAND_TARGET) * 100) : 0;
-      if (sleepPct + stepsPct + standPct === 0) continue;
+      const sleepHrs = entry.sleep_hrs != null ? Number(entry.sleep_hrs) : 0;
+      const steps = entry.steps != null ? Number(entry.steps) : 0;
+      const standHrs = entry.stand_hrs != null ? Number(entry.stand_hrs) : 0;
+      if (sleepHrs + steps + standHrs === 0) continue;
       freshLabels.push(d.slice(5));
-      freshData.sleep.push(sleepPct);
-      freshData.steps.push(stepsPct);
-      freshData.stand.push(standPct);
+      freshData.sleep.push(Math.round(sleepHrs * 10) / 10);
+      freshData.steps.push(Math.round(steps / 1000 * 10) / 10);
+      freshData.stand.push(Math.round(standHrs));
     }
     const chart = chartInstances.find(c => c.canvas?.id === 'baselineChart');
     if (!chart) return;
@@ -3505,9 +3766,10 @@ function renderAnalytics() {
       type: 'bar',
       label: f,
       data: macroData[f],
-      backgroundColor: macroBarColors[f],
-      borderColor: macroBarColors[f],
-      borderWidth: 1,
+      backgroundColor: makeMacroPattern(macroBarColors[f], macroPatternStyles[f]),
+      borderColor: '#000000',
+      borderWidth: 1.5,
+      borderSkipped: false,
       stack: 'macros',
     });
   });
