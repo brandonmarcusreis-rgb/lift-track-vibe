@@ -1995,8 +1995,24 @@ main {
 
 .exercise.completed .btn-copy-prev,
 .exercise.completed .btn-collapse,
+.exercise.completed .btn-ex-edit,
+.exercise.completed .btn-ex-remove,
 .exercise.completed .sets {
   display: none;
+}
+
+/* Reorder-mode row (compact card-like display with drag grip) */
+.exercise-edit-label {
+  flex: 1;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 13px;
+}
+.exercise-edit-group {
+  color: var(--fg-dim);
+  font-weight: 400;
+  font-size: 11px;
+  margin-left: 6px;
 }
 
 .exercise-header {
@@ -2022,6 +2038,59 @@ main {
   font-size: 10px;
   color: var(--fg-dim);
   margin-top: 2px;
+}
+
+/* Repeat [program] picker modal */
+.repeat-picker h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  color: var(--fg);
+}
+.repeat-picker-sub {
+  color: var(--fg-dim);
+  font-size: 11px;
+  margin-bottom: 14px;
+}
+.repeat-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+.repeat-picker-row {
+  background: rgba(40, 254, 20, 0.04);
+  border: 1px solid var(--fg-dim);
+  border-radius: 6px;
+  padding: 10px 12px;
+  text-align: left;
+  font-family: inherit;
+  color: var(--fg);
+  cursor: pointer;
+}
+.repeat-picker-row:active { background: rgba(40, 254, 20, 0.12); }
+.repeat-picker-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.repeat-picker-row-head .repeat-week { color: var(--cyan); }
+.repeat-picker-row-head .repeat-day { color: var(--fg); text-transform: lowercase; }
+.repeat-picker-row-head .repeat-count { color: var(--fg-dim); font-weight: 400; margin-left: auto; }
+.repeat-picker-row-names {
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.repeat-empty {
+  color: var(--fg-dim);
+  font-style: italic;
+  padding: 16px 0;
+  text-align: center;
 }
 
 /* Raw health feed audit table (settings → apple_watch_health) */
@@ -2086,6 +2155,22 @@ main {
 }
 .btn-collapse:active { background: rgba(40, 254, 20, 0.15); }
 .exercise.collapsed .btn-collapse { transform: rotate(-90deg); }
+
+.btn-ex-edit,
+.btn-ex-remove {
+  background: transparent;
+  border: 1px solid var(--fg-dim);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.btn-ex-edit { color: var(--cyan); border-color: var(--cyan); }
+.btn-ex-edit:active { background: rgba(0, 255, 255, 0.15); }
+.btn-ex-remove { color: #FF5A5A; border-color: #FF5A5A; }
+.btn-ex-remove:active { background: rgba(255, 90, 90, 0.15); }
 .exercise.collapsed .sets { display: none; }
 .exercise.collapsed .exercise-group { display: none; }
 

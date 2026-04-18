@@ -807,6 +807,37 @@ let state = loadState();
   if (changed) saveState();
 })();
 
+// One-time backfill: now that volume totals + PRs only count exercises
+// with completed=true, preserve historical workouts by marking any past
+// exercise that already has real set data as completed.
+(function migrateBackfillCompletion() {
+  if (localStorage.getItem('lift_app_completion_backfill_v1')) return;
+  let changed = false;
+  for (const k of Object.keys(state)) {
+    const wk = parseInt(k, 10);
+    if (isNaN(wk)) continue;
+    for (const day of Object.keys(state[wk] || {})) {
+      const exMap = state[wk][day]?.exercises;
+      if (!exMap) continue;
+      for (const name of Object.keys(exMap)) {
+        const ex = exMap[name];
+        if (ex.completed) continue;
+        const hasRealData = Array.isArray(ex.sets) && ex.sets.some(s => {
+          const lbs = parseFloat(s.lbs) || 0;
+          const reps = parseFloat(s.reps) || 0;
+          return lbs > 0 && reps > 0;
+        });
+        if (hasRealData) {
+          ex.completed = true;
+          changed = true;
+        }
+      }
+    }
+  }
+  if (changed) saveState();
+  localStorage.setItem('lift_app_completion_backfill_v1', '1');
+})();
+
 // Rebuild heatmap stamps from state whenever state has exercises that
 // aren't reflected in the group_last_worked map (e.g. after a JSON import).
 (function rebuildHeatmapFromState() {
@@ -1075,8 +1106,9 @@ function renameHabitInList(oldName, newName) {
 }
 
 function getExercisesForDay(day) {
-  if (state.exercises?.[day]) return state.exercises[day];
-  return DAYS[day] || [];
+  // Days start blank for new users — no fallback to DAYS config.
+  // Users populate via `$ add` or `$ repeat program`.
+  return state.exercises?.[day] || [];
 }
 
 function setExercisesForDay(day, list) {
@@ -1088,7 +1120,7 @@ function setExercisesForDay(day, list) {
 function ensureCustomDayExercises(day) {
   if (!state.exercises?.[day]) {
     state.exercises ??= {};
-    state.exercises[day] = (DAYS[day] || []).map(ex => ({ ...ex }));
+    state.exercises[day] = [];
   }
 }
 
@@ -1584,12 +1616,26 @@ function renameExerciseOnDay(day, oldName, newName) {
   return true;
 }
 
+function changeExerciseGroupOnDay(day, name, newGroup) {
+  if (!EXERCISE_GROUPS.includes(newGroup)) return false;
+  ensureCustomDayExercises(day);
+  const idx = state.exercises[day].findIndex(ex => ex.name === name);
+  if (idx === -1) return false;
+  state.exercises[day][idx] = { ...state.exercises[day][idx], group: newGroup };
+  saveState();
+  return true;
+}
+
 function calcDayVolume(week, day) {
   const exercises = getExercisesForDay(day);
   let total = 0;
   for (const ex of exercises) {
     const exData = state?.[week]?.[day]?.exercises?.[ex.name];
     if (!exData) continue;
+    // Only count volume from exercises the user has marked complete
+    // (double-tap on the header). Prevents in-progress numbers from
+    // polluting daily totals and analytics.
+    if (!exData.completed) continue;
     for (const s of exData.sets) {
       const lbs = parseFloat(s.lbs) || 0;
       const reps = parseFloat(s.reps) || 0;
@@ -1722,6 +1768,106 @@ function findLastWorkoutSets(currentDay, exName) {
   return null;
 }
 
+// Enumerate all past (week, day) sessions that had at least one exercise
+// with real set data. Used by the "repeat [program]" picker.
+function listPastPrograms() {
+  const dayOrder = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+  const out = [];
+  for (const k of Object.keys(state)) {
+    const wk = parseInt(k, 10);
+    if (isNaN(wk)) continue;
+    for (const d of dayOrder) {
+      const exMap = state[wk]?.[d]?.exercises;
+      if (!exMap) continue;
+      const names = [];
+      for (const name of Object.keys(exMap)) {
+        const ex = exMap[name];
+        const hasData = Array.isArray(ex.sets) && ex.sets.some(s => {
+          const lbs = parseFloat(s.lbs) || 0;
+          const reps = parseFloat(s.reps) || 0;
+          return lbs > 0 && reps > 0;
+        });
+        if (hasData || ex.completed) names.push(name);
+      }
+      if (names.length === 0) continue;
+      out.push({ week: wk, day: d, names });
+    }
+  }
+  // Newest first: descending week, then descending day-of-week index
+  const dayIdx = Object.fromEntries(dayOrder.map((d, i) => [d, i]));
+  out.sort((a, b) => {
+    if (a.week !== b.week) return b.week - a.week;
+    return dayIdx[b.day] - dayIdx[a.day];
+  });
+  return out;
+}
+
+// Copy a past session's program (exercise list + set weights) into
+// the target day of the current week, overwriting whatever's there.
+// Completion is reset so the user re-does the workout.
+function copyProgramFrom(toDay, fromWeek, fromDay) {
+  // List of exercises: use the source day's current list (day-keyed), which
+  // captures name + group. Fall back to names from the session itself.
+  const sourceList = state.exercises?.[fromDay] || [];
+  const sessionEx = state?.[fromWeek]?.[fromDay]?.exercises || {};
+  const sessionNames = Object.keys(sessionEx);
+  const resolvedList = [];
+  for (const name of sessionNames) {
+    const cfg = sourceList.find(e => e.name === name);
+    resolvedList.push({ name, group: cfg?.group || 'Core' });
+  }
+  setExercisesForDay(toDay, resolvedList);
+
+  // Wipe current session data for this (currentWeek, toDay) and copy sets
+  ensure(currentWeek, toDay);
+  const target = state[currentWeek][toDay];
+  target.exercises = {};
+  for (const name of sessionNames) {
+    const src = sessionEx[name];
+    target.exercises[name] = {
+      sets: (src.sets || []).map(s => ({ lbs: s.lbs || '', reps: s.reps || '' })),
+      completed: false,
+    };
+  }
+  saveState();
+}
+
+function openRepeatProgramPicker(toDay) {
+  const programs = listPastPrograms();
+  const body = el(`
+    <div class="repeat-picker">
+      <h2>## repeat [program]</h2>
+      <div class="repeat-picker-sub">pick a past session to copy into ${toDay} — overwrites today's exercises + weights</div>
+      <div class="repeat-picker-list"></div>
+    </div>
+  `);
+  const list = body.querySelector('.repeat-picker-list');
+  if (programs.length === 0) {
+    list.innerHTML = `<div class="repeat-empty">> no past sessions yet. log a workout first to build history.</div>`;
+  } else {
+    programs.forEach(p => {
+      const row = el(`
+        <button class="repeat-picker-row">
+          <div class="repeat-picker-row-head">
+            <span class="repeat-week">w${String(p.week).padStart(2,'0')}</span>
+            <span class="repeat-day">${p.day}</span>
+            <span class="repeat-count">${p.names.length}ex</span>
+          </div>
+          <div class="repeat-picker-row-names">${p.names.join(', ')}</div>
+        </button>
+      `);
+      row.addEventListener('click', () => {
+        if (!confirm(`overwrite ${toDay} with w${p.week} ${p.day} (${p.names.length} exercises)?`)) return;
+        copyProgramFrom(toDay, p.week, p.day);
+        document.querySelectorAll('.tracking-modal-backdrop').forEach(n => n.remove());
+        renderDay(toDay);
+      });
+      list.appendChild(row);
+    });
+  }
+  openDashboardModal('## repeat [program]', body, 'var(--fg)');
+}
+
 function copyPrevWorkoutSets(day, exName) {
   const found = findLastWorkoutSets(day, exName);
   if (!found) {
@@ -1744,7 +1890,9 @@ function computePRs() {
   Object.keys(DAYS).forEach(day => {
     getExercisesForDay(day).forEach(ex => {
       for (let w = 1; w <= NUM_WEEKS; w++) {
-        const sets = state?.[w]?.[day]?.exercises?.[ex.name]?.sets;
+        const exData = state?.[w]?.[day]?.exercises?.[ex.name];
+        if (!exData || !exData.completed) continue;
+        const sets = exData.sets;
         if (!sets) continue;
         for (const s of sets) {
           const lbs = parseFloat(s.lbs) || 0;
@@ -1763,7 +1911,9 @@ function computePRs() {
 }
 
 function getTopSet(week, day, exName) {
-  const sets = state?.[week]?.[day]?.exercises?.[exName]?.sets;
+  const exData = state?.[week]?.[day]?.exercises?.[exName];
+  if (!exData || !exData.completed) return null;
+  const sets = exData.sets;
   if (!Array.isArray(sets)) return null;
   let best = null;
   for (const s of sets) {
@@ -1901,6 +2051,7 @@ function toggleExerciseCompleted(card, day, exName) {
     exState.completed = false;
     saveState();
     card.classList.remove('completed');
+    updateVolumeRow(day);
     updateSectionCompletion(card, day);
     // Recalculate heatmap for this group since we just un-completed
     const exercises = getExercisesForDay(day);
@@ -1921,12 +2072,39 @@ function toggleExerciseCompleted(card, day, exName) {
     card.classList.add('completed');
     exState.completed = true;
     saveState();
+    updateVolumeRow(day);
     updateSectionCompletion(card, day);
     // Stamp the muscle group as worked for the heatmap
     if (exCfg) stampGroupFromExercise(exCfg.group, day);
+    maybePromptProgramBackup(day);
   };
   card.addEventListener('animationend', onEnd);
   if (navigator.vibrate) navigator.vibrate(20);
+}
+
+// When every exercise in today's [program] is complete, offer a one-tap
+// GitHub backup. Suppressed if backup isn't configured or we've already
+// prompted today.
+function maybePromptProgramBackup(day) {
+  const exercises = getExercisesForDay(day);
+  if (exercises.length === 0) return;
+  const allDone = exercises.every(ex => !!state?.[currentWeek]?.[day]?.exercises?.[ex.name]?.completed);
+  if (!allDone) return;
+  if (!backupConfigured()) return;
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const PROMPT_KEY = 'lift_app_program_backup_prompted';
+  if (localStorage.getItem(PROMPT_KEY) === todayKey) return;
+  localStorage.setItem(PROMPT_KEY, todayKey);
+  // Defer slightly so the rainbow-flash animation finishes before the modal
+  setTimeout(() => {
+    if (confirm(`[program] complete — back up to GitHub now?`)) {
+      if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
+      runBackup().then(() => {
+        const cfg = getBackupCfg();
+        if (cfg.last_error) showError('Backup failed', cfg.last_error);
+      });
+    }
+  }, 250);
 }
 
 function updateSectionCompletion(card, day) {
@@ -2635,14 +2813,18 @@ function buildWeightSection(day, exercises, prevWeek) {
       <div class="exercises-divider"></div>
       <div class="exercises-buttons">
         <button class="btn-exercises-add" data-role="add-exercise">$ add</button>
-        <button class="btn-exercises-remove${exercisesEditMode ? ' active' : ''}" data-role="toggle-remove">${exercisesEditMode ? 'done' : '$ remove'}</button>
+        <button class="btn-exercises-repeat" data-role="repeat-program">$ repeat</button>
+        <button class="btn-exercises-reorder" data-role="toggle-reorder">${exercisesEditMode ? 'done' : '$ reorder'}</button>
       </div>
     </div>
   `);
   exercisesEditRow.querySelector('[data-role="add-exercise"]').addEventListener('click', () => {
     openAddModal('weight', day);
   });
-  exercisesEditRow.querySelector('[data-role="toggle-remove"]').addEventListener('click', () => {
+  exercisesEditRow.querySelector('[data-role="repeat-program"]').addEventListener('click', () => {
+    openRepeatProgramPicker(day);
+  });
+  exercisesEditRow.querySelector('[data-role="toggle-reorder"]').addEventListener('click', () => {
     exercisesEditMode = !exercisesEditMode;
     renderDay(day);
   });
@@ -2655,20 +2837,9 @@ function buildWeightSection(day, exercises, prevWeek) {
       const row = el(`
         <div class="exercise-edit-row" data-ex-name="${ex.name.replace(/"/g, '&quot;')}">
           <span class="drag-grip" aria-hidden="true">⋮⋮</span>
-          <input type="text" class="exercise-edit-input" value="${ex.name.replace(/"/g, '&quot;')}">
-          <button class="exercise-remove-btn">✕</button>
+          <span class="exercise-edit-label">> ${ex.name} <span class="exercise-edit-group">[${ex.group.toLowerCase()}]</span></span>
         </div>
       `);
-      const input = row.querySelector('input');
-      input.addEventListener('change', e => {
-        const ok = renameExerciseOnDay(day, ex.name, e.target.value);
-        if (!ok) e.target.value = ex.name;
-        renderDay(day);
-      });
-      row.querySelector('.exercise-remove-btn').addEventListener('click', () => {
-        removeExerciseFromDay(day, ex.name);
-        renderDay(day);
-      });
       editList.appendChild(row);
     });
 
@@ -2701,6 +2872,8 @@ function buildWeightSection(day, exercises, prevWeek) {
             <div class="exercise-header-actions">
               <button class="btn-collapse" aria-label="toggle collapse">▾</button>
               <button class="btn-copy-prev">$ prv wkt</button>
+              <button class="btn-ex-edit" aria-label="edit exercise">✎</button>
+              <button class="btn-ex-remove" aria-label="remove exercise">✕</button>
             </div>
           </div>
         </div>
@@ -2723,11 +2896,50 @@ function buildWeightSection(day, exercises, prevWeek) {
         else collapsedExercises.delete(collapseKey);
       });
     }
+    const removeBtn = card.querySelector('.btn-ex-remove');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!confirm(`remove ${ex.name}?`)) return;
+        removeExerciseFromDay(day, ex.name);
+        renderDay(day);
+      });
+    }
+    const editBtn = card.querySelector('.btn-ex-edit');
+    if (editBtn) {
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const newName = prompt('exercise name:', ex.name);
+        if (newName && newName.trim() && newName.trim() !== ex.name) {
+          if (!renameExerciseOnDay(day, ex.name, newName)) {
+            alert('rename failed (empty or duplicate name).');
+            return;
+          }
+        }
+        const groupList = EXERCISE_GROUPS.join(', ');
+        const newGroup = prompt(`group (${groupList}):`, ex.group);
+        if (newGroup && newGroup.trim()) {
+          const match = EXERCISE_GROUPS.find(g => g.toLowerCase() === newGroup.trim().toLowerCase());
+          if (!match) {
+            alert(`unknown group "${newGroup}". valid: ${groupList}`);
+          } else if (match !== ex.group) {
+            const finalName = (newName && newName.trim()) ? newName.trim() : ex.name;
+            changeExerciseGroupOnDay(day, finalName, match);
+          }
+        }
+        renderDay(day);
+      });
+    }
 
     const headerRow = card.querySelector('.exercise-header-row');
     let lastTap = 0;
     headerRow.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-copy-prev') || e.target.closest('.btn-collapse')) return;
+      if (
+        e.target.closest('.btn-copy-prev') ||
+        e.target.closest('.btn-collapse') ||
+        e.target.closest('.btn-ex-edit') ||
+        e.target.closest('.btn-ex-remove')
+      ) return;
       const now = Date.now();
       if (now - lastTap < 350) {
         lastTap = 0;
