@@ -1160,6 +1160,25 @@ body.menu-open .prompt {
   background: var(--yellow);
   box-shadow: 0 0 6px rgba(255,255,85,0.6);
 }
+/* Completed state: all daily_tracking items are checked */
+.dash-pill.completed {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--fg-dim);
+  color: var(--fg-dim);
+}
+.dash-pill.completed .dash-pill-dot {
+  background: var(--fg-dim);
+  box-shadow: none;
+}
+.dash-pill.flash {
+  animation: pillFlash 0.9s ease-out;
+}
+@keyframes pillFlash {
+  0%   { transform: scale(1);    background: rgba(40, 254, 20, 0.35); border-color: var(--fg); color: var(--fg); }
+  35%  { transform: scale(1.08); background: rgba(40, 254, 20, 0.55); border-color: var(--fg); color: var(--fg); }
+  70%  { transform: scale(1.02); background: rgba(40, 254, 20, 0.15); border-color: var(--fg); color: var(--fg); }
+  100% { transform: scale(1);    background: rgba(255, 255, 255, 0.04); border-color: var(--fg-dim); color: var(--fg-dim); }
+}
 
 /* Macros summary box in dashboard */
 .dash-macros-box {
@@ -1975,6 +1994,7 @@ main {
 }
 
 .exercise.completed .btn-copy-prev,
+.exercise.completed .btn-collapse,
 .exercise.completed .sets {
   display: none;
 }
@@ -2003,6 +2023,28 @@ main {
   color: var(--fg-dim);
   margin-top: 2px;
 }
+
+.exercise-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-collapse {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--fg-dim);
+  padding: 2px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+.btn-collapse:active { background: rgba(40, 254, 20, 0.15); }
+.exercise.collapsed .btn-collapse { transform: rotate(-90deg); }
+.exercise.collapsed .sets { display: none; }
+.exercise.collapsed .exercise-group { display: none; }
 
 .btn-copy-prev {
   background: transparent;

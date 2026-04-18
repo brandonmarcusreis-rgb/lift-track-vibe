@@ -1480,7 +1480,7 @@ function setBodyReps(week, day, name, reps) {
 }
 
 const DEFAULT_SECTION_ORDER = ['weight', 'body'];
-const SECTION_LABELS = { weight: '[weight]', body: '[body]' };
+const SECTION_LABELS = { weight: '[program]', body: '[body]' };
 
 function getSectionOrder() {
   const saved = state.sections?.order;
@@ -1670,26 +1670,41 @@ function todayWeekdayKey() {
   return days[new Date().getDay()];
 }
 
-function copyPrevWeekSets(day, exName) {
-  if (currentWeek <= 1) {
-    alert('no previous week to copy from');
-    return;
+// Find the most recent (week, day) where this exercise was logged with
+// non-empty set data, excluding the current (currentWeek, day) slot.
+function findLastWorkoutSets(currentDay, exName) {
+  const dayOrder = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+  const currentDayIdx = dayOrder.indexOf(currentDay);
+  for (let w = currentWeek; w >= 1; w--) {
+    // Within currentWeek, only consider days before today (earlier in week).
+    // For prior weeks, consider all days; iterate sun→mon to get the
+    // chronologically-latest day of that week first.
+    const maxDayIdx = (w === currentWeek) ? currentDayIdx - 1 : 6;
+    for (let di = maxDayIdx; di >= 0; di--) {
+      const d = dayOrder[di];
+      const sets = state?.[w]?.[d]?.exercises?.[exName]?.sets;
+      if (!sets) continue;
+      if (sets.every(s => !s.lbs && !s.reps)) continue;
+      return { week: w, day: d, sets };
+    }
   }
-  const prev = currentWeek - 1;
-  const prevSets = state?.[prev]?.[day]?.exercises?.[exName]?.sets;
-  if (!prevSets || prevSets.every(s => !s.lbs && !s.reps)) {
-    alert(`no data in week ${prev} for ${exName}`);
+  return null;
+}
+
+function copyPrevWorkoutSets(day, exName) {
+  const found = findLastWorkoutSets(day, exName);
+  if (!found) {
+    alert(`no previous session found for ${exName}`);
     return;
   }
   ensure(currentWeek, day, exName);
-  state[currentWeek][day].exercises[exName].sets = prevSets.map(s => ({
+  state[currentWeek][day].exercises[exName].sets = found.sets.map(s => ({
     lbs: s.lbs || '',
     reps: s.reps || '',
   }));
   saveState();
   const savedScroll = window.scrollY;
   renderDay(day, { preserveScroll: true });
-  // Restore scroll after the render
   window.scrollTo({ top: savedScroll, behavior: 'instant' });
 }
 
@@ -1765,6 +1780,8 @@ function fmtNum(n) {
 }
 
 let supplementsEditMode = false;
+// Session-level collapse state for individual exercise cards (resets on reload)
+const collapsedExercises = new Set();
 let exercisesEditMode = false;
 let bodyEditMode = false;
 let sectionClickSuppressedUntil = 0;
@@ -1804,6 +1821,7 @@ function renderSupplementsRows(container, day) {
         const nowChecked = toggleHabit(currentWeek, day, h);
         e.target.classList.toggle('checked', nowChecked);
         e.target.textContent = nowChecked ? '✓' : '';
+        updateTrackingPillState(day, true);
       });
       container.appendChild(row);
     }
@@ -1827,6 +1845,20 @@ function renderSupplementsRows(container, day) {
     btn.addEventListener('click', doAdd);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doAdd(); } });
     container.appendChild(addRow);
+  }
+}
+
+function updateTrackingPillState(day, flashIfNew = false) {
+  const pill = document.querySelector('[data-role="open-tracking"]');
+  if (!pill) return;
+  const list = getHabitsList();
+  const allChecked = list.length > 0 && list.every(h => getHabit(currentWeek, day, h));
+  const wasComplete = pill.classList.contains('completed');
+  pill.classList.toggle('completed', allChecked);
+  if (flashIfNew && allChecked && !wasComplete) {
+    pill.classList.remove('flash');
+    void pill.offsetWidth;
+    pill.classList.add('flash');
   }
 }
 
@@ -2402,6 +2434,8 @@ function renderDay(day, opts = {}) {
       openDashboardModal('## daily_tracking', habitsBlock, 'var(--yellow)');
     });
   }
+  // Apply completed-state styling on mount (no flash on first paint)
+  updateTrackingPillState(day, false);
 
   // Wire up the macros summary box → pops modal with the full macros editor
   const macrosSummary = dashboard.querySelector('[data-role="open-macros"]');
@@ -2414,7 +2448,7 @@ function renderDay(day, opts = {}) {
   }
   main.appendChild(dashboard);
 
-  // ─── Daily totals (sits above [weight] section) ───
+  // ─── Daily totals (sits above [program] section) ───
   const vol = calcDayVolume(currentWeek, day);
   const totalsBlock = el(`
     <div class="daily-totals">
@@ -2430,7 +2464,7 @@ function renderDay(day, opts = {}) {
   `);
   main.appendChild(totalsBlock);
 
-  // ─── [weight] section ───
+  // ─── [program] section ───
   const sectionsContainer = el(`<div class="sections-container"></div>`);
   sectionsContainer.appendChild(buildWeightSection(day, exercises, prevWeek));
   main.appendChild(sectionsContainer);
@@ -2623,32 +2657,46 @@ function buildWeightSection(day, exercises, prevWeek) {
   exercises.forEach(ex => {
     const exState = state?.[currentWeek]?.[day]?.exercises?.[ex.name];
     const isCompleted = !!exState?.completed;
+    const collapseKey = `${currentWeek}:${day}:${ex.name}`;
+    const isCollapsed = collapsedExercises.has(collapseKey);
     const card = el(`
-      <div class="exercise${isCompleted ? ' completed' : ''}">
+      <div class="exercise${isCompleted ? ' completed' : ''}${isCollapsed ? ' collapsed' : ''}">
         <div class="exercise-header">
           <div class="exercise-header-row">
             <div>
               <div class="exercise-name">> ${exKey(ex.name)}</div>
               <div class="exercise-group">${ex.group.toLowerCase()}</div>
             </div>
-            <button class="btn-copy-prev" ${prevWeek < 1 ? 'disabled' : ''}>$ prv wk</button>
+            <div class="exercise-header-actions">
+              <button class="btn-collapse" aria-label="toggle collapse">▾</button>
+              <button class="btn-copy-prev">$ prv wkt</button>
+            </div>
           </div>
         </div>
         <div class="sets"></div>
       </div>
     `);
     const copyBtn = card.querySelector('.btn-copy-prev');
-    if (copyBtn && !copyBtn.disabled) {
+    if (copyBtn) {
       copyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        copyPrevWeekSets(day, ex.name);
+        copyPrevWorkoutSets(day, ex.name);
+      });
+    }
+    const collapseBtn = card.querySelector('.btn-collapse');
+    if (collapseBtn) {
+      collapseBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const nowCollapsed = card.classList.toggle('collapsed');
+        if (nowCollapsed) collapsedExercises.add(collapseKey);
+        else collapsedExercises.delete(collapseKey);
       });
     }
 
     const headerRow = card.querySelector('.exercise-header-row');
     let lastTap = 0;
     headerRow.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-copy-prev')) return;
+      if (e.target.closest('.btn-copy-prev') || e.target.closest('.btn-collapse')) return;
       const now = Date.now();
       if (now - lastTap < 350) {
         lastTap = 0;
@@ -3177,6 +3225,11 @@ Chart.defaults.elements.bar.borderRadius = 3;
 Chart.defaults.elements.bar.borderSkipped = false;
 Chart.defaults.elements.line.borderWidth = 2;
 Chart.defaults.elements.point.hoverRadius = 5;
+// Default load animation — slightly slower punchy ease so charts feel alive
+Chart.defaults.animation = {
+  duration: 900,
+  easing: 'easeOutQuart',
+};
 
 let chartInstances = [];
 function destroyCharts() {
@@ -3287,7 +3340,10 @@ function toggleChartFullscreen(container) {
 
   setTimeout(() => {
     const chart = chartInstances.find(c => container.contains(c.canvas));
-    if (chart) chart.resize();
+    if (!chart) return;
+    chart.resize();
+    // Replay the entry animation at fullscreen size
+    try { chart.reset(); chart.update(); } catch {}
   }, 100);
 }
 
@@ -3529,7 +3585,7 @@ function renderAnalytics() {
   const sleepLabels = allWeeks.map(w => `w${String(w).padStart(2,'0')}`);
   const volTrendData = allWeeks.map(w => calcWeekTotalVolume(w));
 
-  const weightAnalyticsSection = buildAnalyticsCollapsible('weight', '## [weight]');
+  const weightAnalyticsSection = buildAnalyticsCollapsible('weight', '## [program]');
   const chartRow = el(`<div class="chart-stack"></div>`);
   weightAnalyticsSection.querySelector('.section-body').appendChild(chartRow);
   main.appendChild(weightAnalyticsSection);
@@ -3770,7 +3826,6 @@ function renderAnalytics() {
       borderColor: '#000000',
       borderWidth: 1.5,
       borderSkipped: false,
-      stack: 'macros',
     });
   });
   macroOrder.forEach(f => {
@@ -3812,44 +3867,22 @@ function renderAnalytics() {
           },
         },
         datalabels: {
-          display: (ctx) => {
-            if (ctx.dataset.type === 'line') return false;
-            // Only show total on top segment of stacked bar
-            const meta = ctx.chart.getDatasetMeta(ctx.datasetIndex);
-            if (!meta.stack) return false;
-            const stackDatasets = ctx.chart.data.datasets.filter((d,i) => {
-              const m = ctx.chart.getDatasetMeta(i);
-              return m.stack === meta.stack && !d.type;
-            });
-            const lastVisible = stackDatasets[stackDatasets.length - 1];
-            if (ctx.dataset !== lastVisible) return false;
-            // Sum the stacked value
-            const total = stackDatasets.reduce((sum, d) => sum + (d.data[ctx.dataIndex] || 0), 0);
-            return total > 0;
-          },
+          display: (ctx) => ctx.dataset.type !== 'line' && ctx.dataset.data[ctx.dataIndex] > 0,
           anchor: 'end',
           align: 'end',
           color: '#FF9933',
-          font: { family: 'Menlo, monospace', size: 8, weight: '600' },
-          formatter: (v, ctx) => {
-            const stackDatasets = ctx.chart.data.datasets.filter((d,i) => {
-              const m = ctx.chart.getDatasetMeta(i);
-              return m.stack && !d.type;
-            });
-            return stackDatasets.reduce((sum, d) => sum + (d.data[ctx.dataIndex] || 0), 0) + 'g';
-          },
+          font: { family: 'Menlo, monospace', size: 7, weight: '600' },
+          formatter: (v) => (v > 0 ? v + 'g' : ''),
           offset: -2,
         },
       },
       scales: {
         x: {
-          stacked: true,
           ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 8 }, maxRotation: 60, minRotation: 60 },
           grid: { color: 'rgba(255,153,51,0.08)', lineWidth: 1 },
           border: { color: 'rgba(255,153,51,0.3)' },
         },
         y: {
-          stacked: true,
           position: 'left',
           beginAtZero: true,
           ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 9 }, callback: (v) => v + 'g' },
@@ -4921,7 +4954,7 @@ function renderWalkthrough() {
     },
     {
       title: 'log every set',
-      desc: 'the [weight] section tracks your strength training. each exercise has 3 sets with weight and reps.',
+      desc: 'the [program] section tracks your strength training. each exercise has 3 sets with weight and reps.',
       preview: `
         <div class="wt-box" style="border-color:var(--fg)">
           <span style="color:var(--fg)">> bench_press</span> <span style="color:var(--fg-dim)">chest</span><br>
@@ -5191,14 +5224,14 @@ once configured, the app auto-commits every change to your repo (debounced 30s).
 <em>> baseline (cyan):</em> shows yesterday's sleep, stand, and steps from your apple shortcuts feed. editable as a fallback. tap the <strong>(i)</strong> button for details. the pink score boxes rate sleep and steps against targets.`,
     },
     {
-      title: '## [weight]_section',
-      body: `the green <strong>[weight]</strong> collapsible section contains your strength exercises.
+      title: '## [program]_section',
+      body: `the green <strong>[program]</strong> collapsible section contains your strength exercises.
 
 <em>> logging sets:</em> each exercise has 3 sets. type the weight and reps directly, or use the <strong>+</strong> and <strong>−</strong> buttons.
 
 <em>> completing exercises:</em> double-tap the exercise header to mark it done. a rainbow flash plays and the card collapses to a grey row. double-tap again to reopen.
 
-<em>> $ prv wk:</em> copies last week's set data for that exercise into this week. handy for progressive overload — copy, then bump the numbers.
+<em>> $ prv wkt:</em> copies the most recent set data for that exercise from any prior session (not just last week) into today. handy for progressive overload — copy, then bump the numbers.
 
 <em>> add / remove:</em> tap <strong>$ add</strong> (green) to open the add modal — create a new exercise or pick one from your history. tap <strong>$ remove</strong> (red) to enter remove mode where you can delete, rename, or drag-reorder exercises.
 
@@ -5208,7 +5241,7 @@ once configured, the app auto-commits every change to your repo (debounced 30s).
       title: '## daily_totals',
       body: `a yellow summary box sits at the bottom of each day:
 
-• <strong>>> dailyWeight_Volume</strong> — total weight × reps across all [weight] exercises. shows a green ▲ or red ▼ arrow comparing to the same day last week.
+• <strong>>> dailyWeight_Volume</strong> — total weight × reps across all [program] exercises. shows a green ▲ or red ▼ arrow comparing to the same day last week.
 
 values respect the lb ↔ kg unit toggle in settings.`,
     },
@@ -5222,7 +5255,7 @@ values respect the lb ↔ kg unit toggle in settings.`,
 
 <em>> baseline:</em> a grouped bar chart of sleep, steps, and stand as % of target (8 hrs, 10k steps, 12 hrs). data from your apple shortcuts health feed.
 
-<em>> [weight] reports:</em> collapsible section with volume-by-day (4 weeks, color-coded) and weekly-volume-trend (single purple line).
+<em>> [program] reports:</em> collapsible section with volume-by-day (4 weeks, color-coded) and weekly-volume-trend (single purple line).
 
 <em>> expanding charts:</em> tap any chart title to pop it out as a centered card over a blurred background. tap ✕ or the backdrop to close. pinch with two fingers to zoom in on details.
 
