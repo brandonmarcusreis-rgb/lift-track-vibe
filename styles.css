@@ -2040,6 +2040,97 @@ main {
   margin-top: 2px;
 }
 
+/* Demo mode banner (sits above everything when active) */
+.demo-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  background: linear-gradient(90deg, rgba(192, 132, 252, 0.18), rgba(192, 132, 252, 0.08));
+  border-bottom: 1px solid #C084FC;
+  color: #C084FC;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: lowercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.demo-banner-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #C084FC;
+  box-shadow: 0 0 6px rgba(192, 132, 252, 0.8);
+  animation: demo-pulse 1.6s ease-in-out infinite;
+}
+@keyframes demo-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+.demo-banner-text { flex: 1; }
+.demo-banner-exit {
+  background: transparent;
+  border: 1px solid #C084FC;
+  color: #C084FC;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.demo-banner-exit:active { background: rgba(192, 132, 252, 0.2); }
+body.demo-active { padding-top: 28px; }
+
+/* Macro goals settings form */
+.macro-goals-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 12px;
+}
+.macro-goals-grid label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+}
+.macro-goals-grid label span {
+  color: var(--orange, #FF9933);
+  min-width: 52px;
+  font-weight: 600;
+}
+.macro-goals-grid input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--fg-dim);
+  color: var(--fg);
+  padding: 4px 6px;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+}
+.macro-goals-grid input:focus {
+  outline: 1px solid var(--orange, #FF9933);
+  outline-offset: -1px;
+}
+.macro-avg-goal {
+  color: var(--fg-dim);
+  font-weight: 400;
+  font-size: 9px;
+  margin-left: 2px;
+}
+
 /* Repeat [program] picker modal */
 .repeat-picker h2 {
   margin: 0 0 4px;

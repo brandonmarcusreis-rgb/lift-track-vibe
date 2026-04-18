@@ -66,7 +66,14 @@ function loadState() {
   }
 }
 
+// Session-only demo mode. When active, state is swapped to an in-memory
+// seeded copy and writes are suppressed so real data is never touched.
+let demoMode = false;
+let stashedRealState = null;
+
 function saveState() {
+  // In demo mode we never persist to localStorage or trigger GitHub backup.
+  if (demoMode) return;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   scheduleBackup();
 }
@@ -85,6 +92,32 @@ function setUnit(u) {
 
 function unitLabel() {
   return getUnit() === 'kg' ? 'kg' : 'lbs';
+}
+
+const MACRO_GOALS_KEY = 'lift_app_macro_goals';
+const DEFAULT_MACRO_GOALS = { protein: 150, fiber: 40, carb: 250, fat: 70 };
+
+function getMacroGoals() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MACRO_GOALS_KEY) || '{}');
+    return {
+      protein: Number(raw.protein) > 0 ? Number(raw.protein) : DEFAULT_MACRO_GOALS.protein,
+      fiber:   Number(raw.fiber)   > 0 ? Number(raw.fiber)   : DEFAULT_MACRO_GOALS.fiber,
+      carb:    Number(raw.carb)    > 0 ? Number(raw.carb)    : DEFAULT_MACRO_GOALS.carb,
+      fat:     Number(raw.fat)     > 0 ? Number(raw.fat)     : DEFAULT_MACRO_GOALS.fat,
+    };
+  } catch {
+    return { ...DEFAULT_MACRO_GOALS };
+  }
+}
+
+function setMacroGoals(g) {
+  localStorage.setItem(MACRO_GOALS_KEY, JSON.stringify({
+    protein: Number(g.protein) || 0,
+    fiber:   Number(g.fiber)   || 0,
+    carb:    Number(g.carb)    || 0,
+    fat:     Number(g.fat)     || 0,
+  }));
 }
 
 const KG_PER_LB = 0.45359237;
@@ -165,6 +198,8 @@ function scheduleBackup(delay = BACKUP_DEBOUNCE_MS) {
 async function runBackup() {
   if (backupInFlight) return;
   if (!backupConfigured()) return;
+  // Hard guard against pushing seeded demo data to a real repo.
+  if (demoMode) return;
   backupInFlight = true;
   updateBackupStatus('saving');
   try {
@@ -304,6 +339,10 @@ async function backupToGithub() {
 }
 
 async function restoreFromGithub() {
+  if (demoMode) {
+    alert('exit demo mode before restoring from github.');
+    return;
+  }
   if (!backupConfigured()) {
     alert('GitHub not configured.');
     return;
@@ -1830,6 +1869,140 @@ function copyProgramFrom(toDay, fromWeek, fromDay) {
     };
   }
   saveState();
+}
+
+// Seed a rich-looking demo state for a walkthrough / showcase. Never
+// persisted — only lives in memory while demoMode === true.
+function buildDemoState() {
+  const demo = {
+    sections: { order: {}, collapsed: {} },
+    exercises: {
+      monday: [
+        { name: 'Bench Press',      group: 'Chest' },
+        { name: 'Incline DB Press', group: 'Chest' },
+        { name: 'Lat Pulldown',     group: 'Upper Back' },
+        { name: 'Cable Row',        group: 'Upper Back' },
+        { name: 'Bicep Curl',       group: 'Biceps' },
+      ],
+      tuesday: [
+        { name: 'Back Squat',          group: 'Thighs' },
+        { name: 'Leg Press',           group: 'Thighs' },
+        { name: 'Hip Thrust',          group: 'Glutes' },
+        { name: 'Romanian Deadlift',   group: 'Glutes' },
+        { name: 'Standing Calf Raise', group: 'Calves' },
+      ],
+      thursday: [
+        { name: 'Overhead Press',   group: 'Shoulders' },
+        { name: 'Lateral Raise',    group: 'Shoulders' },
+        { name: 'Tricep Pushdown',  group: 'Triceps' },
+        { name: 'Skull Crusher',    group: 'Triceps' },
+      ],
+      friday: [
+        { name: 'Deadlift',    group: 'Lower Back' },
+        { name: 'Pull Up',     group: 'Upper Back' },
+        { name: 'Hammer Curl', group: 'Biceps' },
+        { name: 'Core Plank',  group: 'Core' },
+      ],
+    },
+    habitsList: ['vitamins', 'creatine', 'magnesium'],
+    bodyActivities: { wednesday: [], saturday: [], sunday: [] },
+  };
+  const baseWeights = {
+    'Bench Press': 135, 'Incline DB Press': 50, 'Lat Pulldown': 120, 'Cable Row': 100, 'Bicep Curl': 30,
+    'Back Squat': 185, 'Leg Press': 270, 'Hip Thrust': 225, 'Romanian Deadlift': 155, 'Standing Calf Raise': 90,
+    'Overhead Press': 85, 'Lateral Raise': 20, 'Tricep Pushdown': 50, 'Skull Crusher': 40,
+    'Deadlift': 225, 'Pull Up': 0, 'Hammer Curl': 30, 'Core Plank': 0,
+  };
+  const workoutDays = ['monday','tuesday','thursday','friday'];
+  const DEMO_WEEKS = 4;
+  for (let w = 1; w <= DEMO_WEEKS; w++) {
+    demo[w] = {};
+    for (const d of Object.keys(demo.exercises)) {
+      const exList = demo.exercises[d];
+      const exMap = {};
+      // Current week's Friday is in-progress — not completed — so the user
+      // can see the "live workout" state during a demo walkthrough.
+      const isInProgress = (w === DEMO_WEEKS && d === 'friday');
+      for (const ex of exList) {
+        const base = baseWeights[ex.name] ?? 100;
+        const bump = (w - 1) * 5;
+        const reps = 10 - ((w - 1) % 3);
+        exMap[ex.name] = {
+          sets: [
+            { lbs: String(base + bump), reps: String(reps) },
+            { lbs: String(base + bump), reps: String(Math.max(6, reps - 1)) },
+            { lbs: String(base + bump), reps: String(Math.max(5, reps - 2)) },
+          ],
+          completed: !isInProgress,
+        };
+      }
+      demo[w][d] = {
+        exercises: exMap,
+        sleep: '',
+        habits: { vitamins: true, creatine: w % 2 === 0, magnesium: w % 2 === 1 },
+        protein: 140 + (w % 3) * 10,
+        fiber:   34 + (w % 2) * 4,
+        carb:    210 + w * 8,
+        fat:     65 + (w % 3) * 4,
+        water:   [1, 1, 1, 1, 1, 1, 1, 1],
+      };
+    }
+    // Rest days get macros + habits too
+    for (const d of ['wednesday','saturday','sunday']) {
+      demo[w][d] = {
+        exercises: {},
+        sleep: '',
+        habits: { vitamins: true, creatine: true, magnesium: d !== 'sunday' },
+        protein: 130, fiber: 32, carb: 200, fat: 60,
+        water: [1, 1, 1, 1, 1, 1],
+      };
+    }
+  }
+  return { state: demo, week: DEMO_WEEKS };
+}
+
+function enterDemoMode() {
+  if (demoMode) return;
+  stashedRealState = state;
+  const demo = buildDemoState();
+  state = demo.state;
+  currentWeek = demo.week;
+  demoMode = true;
+  document.body.classList.add('demo-active');
+  renderDemoBanner();
+  // Jump to monday so the demo immediately shows a populated day
+  currentDay = 'monday';
+  renderDay(currentDay);
+}
+
+function exitDemoMode() {
+  if (!demoMode) return;
+  state = stashedRealState || loadState();
+  stashedRealState = null;
+  demoMode = false;
+  currentWeek = currentCalendarWeek();
+  document.body.classList.remove('demo-active');
+  document.querySelectorAll('.demo-banner').forEach(n => n.remove());
+  const day = (currentDay && DAYS[currentDay]) ? currentDay : 'monday';
+  currentDay = day;
+  renderDay(day);
+}
+
+function renderDemoBanner() {
+  document.querySelectorAll('.demo-banner').forEach(n => n.remove());
+  if (!demoMode) return;
+  const banner = el(`
+    <div class="demo-banner">
+      <span class="demo-banner-dot"></span>
+      <span class="demo-banner-text">demo mode — dummy data, nothing is being saved</span>
+      <button class="demo-banner-exit">$ exit</button>
+    </div>
+  `);
+  banner.querySelector('.demo-banner-exit').addEventListener('click', (e) => {
+    e.stopPropagation();
+    exitDemoMode();
+  });
+  document.body.appendChild(banner);
 }
 
 function openRepeatProgramPicker(toDay) {
@@ -3711,9 +3884,13 @@ function renderAnalytics() {
     macroAvgs[f] = arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
   });
 
-  const macroAvgRowsHtml = macroOrder.map(f =>
-    `<div class="macro-avg-chip"><div class="macro-avg-label">${f}</div><div class="macro-avg-value">${macroAvgs[f] != null ? macroAvgs[f] + 'g' : '—'}</div></div>`
-  ).join('');
+  const macroGoals = getMacroGoals();
+  const macroAvgRowsHtml = macroOrder.map(f => {
+    const avg = macroAvgs[f];
+    const goal = macroGoals[f];
+    const goalTxt = goal > 0 ? ` / ${goal}g` : '';
+    return `<div class="macro-avg-chip"><div class="macro-avg-label">${f}</div><div class="macro-avg-value">${avg != null ? avg + 'g' : '—'}<span class="macro-avg-goal">${goalTxt}</span></div></div>`;
+  }).join('');
 
   // ── Water intake average (cups/day) across all logged days ──
   const waterValues = [];
@@ -4115,6 +4292,24 @@ function renderAnalytics() {
       yAxisID: 'yTrend',
     });
   });
+  // Goal lines: one horizontal line per macro at its configured target.
+  // Color-matched to each macro's bar so the association is obvious.
+  macroOrder.forEach(f => {
+    const target = macroGoals[f];
+    if (!target || target <= 0) return;
+    macroDatasets.push({
+      type: 'line',
+      label: `${f}_goal`,
+      data: macroDayLabels.map(() => target),
+      borderColor: macroBarColors[f],
+      backgroundColor: macroBarColors[f],
+      borderWidth: 1.5,
+      borderDash: [2, 4],
+      fill: false,
+      pointRadius: 0,
+      tension: 0,
+    });
+  });
 
   chartInstances.push(new Chart(document.getElementById('macrosChart'), {
     type: 'bar',
@@ -4131,7 +4326,7 @@ function renderAnalytics() {
             color: '#FF9933',
             font: { family: 'Menlo, monospace', size: 10 },
             boxWidth: 12,
-            filter: (item) => !item.text.endsWith('_trend'),
+            filter: (item) => !item.text.endsWith('_trend') && !item.text.endsWith('_goal'),
           },
         },
         datalabels: {
@@ -4304,6 +4499,34 @@ function renderSettings() {
   importBlock.querySelector('.btn-csv-template').addEventListener('click', downloadCSVTemplate);
   importBlock.querySelector('.btn-csv-import').addEventListener('click', importCSVFile);
 
+  // ── Macro goals (orange) ──
+  const goals = getMacroGoals();
+  const macroGoalsBlock = el(`
+    <div class="settings" data-box="macro-goals">
+      <div class="section-title">## macro_goals // daily_targets</div>
+      <div class="settings-help" style="margin-bottom:12px">
+        daily targets for each macro in grams. shown as goal lines on the macros chart + next to averages. set 0 to disable a target.
+      </div>
+      <div class="macro-goals-grid">
+        <label><span>protein</span><input type="number" inputmode="decimal" data-macro="protein" value="${goals.protein}" min="0">g</label>
+        <label><span>fiber</span><input type="number" inputmode="decimal" data-macro="fiber" value="${goals.fiber}" min="0">g</label>
+        <label><span>carb</span><input type="number" inputmode="decimal" data-macro="carb" value="${goals.carb}" min="0">g</label>
+        <label><span>fat</span><input type="number" inputmode="decimal" data-macro="fat" value="${goals.fat}" min="0">g</label>
+      </div>
+      <div class="settings-buttons" style="margin-top:10px">
+        <button class="btn btn-save-goals">$ save</button>
+      </div>
+    </div>
+  `);
+  macroGoalsBlock.querySelector('.btn-save-goals').addEventListener('click', () => {
+    const next = {};
+    macroGoalsBlock.querySelectorAll('input[data-macro]').forEach(i => {
+      next[i.dataset.macro] = parseFloat(i.value) || 0;
+    });
+    setMacroGoals(next);
+    alert('macro goals saved');
+  });
+
   // ── Danger zone (red) ──
   const dangerBlock = el(`
     <div class="settings" data-box="danger">
@@ -4318,16 +4541,39 @@ function renderSettings() {
   `);
   dangerBlock.querySelector('.btn-danger').addEventListener('click', clearAllData);
 
-  // Make all but cache collapsible (cache is a quick-action button, always visible)
+  // ── Demo mode (purple quick-action, always visible) ──
+  const demoBlock = el(`
+    <div class="settings cache-quick" data-box="demo-mode">
+      <div class="cache-quick-row">
+        <div class="cache-quick-label" style="color:#C084FC">## demo_mode</div>
+        <button class="btn btn-demo-toggle" style="border-color:#C084FC;color:#C084FC">
+          ${demoMode ? '$ exit_demo' : '$ enter_demo'}
+        </button>
+      </div>
+      <div class="settings-help" style="margin-top:8px">
+        ${demoMode
+          ? 'demo data is in memory only. nothing you tap here is saved.'
+          : 'swap to seeded dummy data for a walkthrough — your real data is not touched.'}
+      </div>
+    </div>
+  `);
+  demoBlock.querySelector('.btn-demo-toggle').addEventListener('click', () => {
+    if (demoMode) exitDemoMode(); else enterDemoMode();
+  });
+
+  // Make all but cache + demo collapsible (they are quick-actions, always visible)
   makeCollapsibleSettingsBox(ghBlock);
   makeCollapsibleSettingsBox(unitBlock);
+  makeCollapsibleSettingsBox(macroGoalsBlock);
   makeCollapsibleSettingsBox(importBlock);
   makeCollapsibleSettingsBox(dangerBlock);
 
-  // Order: clear_cache (white) → github (green) → unit (yellow) → import (blue) → danger (red)
+  // Order: clear_cache (white) → demo (purple) → github (green) → unit (yellow) → macro_goals (orange) → import (blue) → danger (red)
   main.appendChild(cacheBlock);
+  main.appendChild(demoBlock);
   main.appendChild(ghBlock);
   main.appendChild(unitBlock);
+  main.appendChild(macroGoalsBlock);
   main.appendChild(importBlock);
   main.appendChild(dangerBlock);
   setTimeout(updateBackupStatus, 0);
@@ -5624,6 +5870,10 @@ the import is atomic: if any row has an error, nothing is written. errors report
 }
 
 function clearAllData() {
+  if (demoMode) {
+    alert('exit demo mode before wiping local data.');
+    return;
+  }
   const confirm1 = confirm('Wipe ALL workout data? This cannot be undone.');
   if (!confirm1) return;
   const confirm2 = confirm('Are you absolutely sure? Last chance.');
