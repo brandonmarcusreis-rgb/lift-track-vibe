@@ -1,4 +1,4 @@
-const CACHE = 'lift-app-v172';
+const CACHE = 'lift-app-v173';
 const ASSETS = [
   '/',
   '/index.html',

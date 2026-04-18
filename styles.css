@@ -2024,6 +2024,49 @@ main {
   margin-top: 2px;
 }
 
+/* Raw health feed audit table (settings → apple_watch_health) */
+.raw-audit {
+  margin: 14px 0;
+  border: 1px solid var(--fg-dim);
+  border-radius: 4px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.02);
+}
+.raw-audit summary {
+  cursor: pointer;
+  color: var(--cyan);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: lowercase;
+  list-style: none;
+  outline: none;
+}
+.raw-audit summary::-webkit-details-marker { display: none; }
+.raw-audit summary::before { content: '▸ '; display: inline-block; transition: transform 0.15s; }
+.raw-audit[open] summary::before { content: '▾ '; }
+.raw-audit-table {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-family: inherit;
+  font-size: 10px;
+}
+.raw-audit-table th,
+.raw-audit-table td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  color: var(--fg);
+}
+.raw-audit-table th {
+  color: var(--fg-dim);
+  font-weight: 600;
+  text-transform: lowercase;
+  border-bottom: 1px solid var(--fg-dim);
+}
+.raw-audit-table .raw-empty { color: var(--fg-dim); font-style: italic; }
+.raw-audit-table .raw-meta { color: var(--fg-dim); font-size: 9px; }
+
 .exercise-header-actions {
   display: flex;
   align-items: center;

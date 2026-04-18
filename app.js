@@ -516,6 +516,24 @@ function renderHealthBlock(health) {
     if (health[dates[i]]) { latest = { date: dates[i], ...health[dates[i]] }; break; }
   }
 
+  // Raw data audit: last 7 days, exactly as the Shortcut wrote them.
+  // Lets you diff against Apple Health to pinpoint units / field bugs.
+  const recentDates = dates.slice(-7).reverse(); // newest first
+  const rawRows = recentDates.map(d => {
+    const e = health[d];
+    if (!e) return `<tr><td>${d.slice(5)}</td><td colspan="4" class="raw-empty">— no file —</td></tr>`;
+    const written = e.written_at ? new Date(e.written_at).toLocaleString([], { month:'numeric', day:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    return `
+      <tr>
+        <td>${d.slice(5)}</td>
+        <td>${e.sleep_hrs != null ? Number(e.sleep_hrs).toFixed(2) : '—'}</td>
+        <td>${e.steps != null ? Number(e.steps).toLocaleString() : '—'}</td>
+        <td>${e.stand_hrs != null ? Number(e.stand_hrs).toFixed(2) : '—'}</td>
+        <td class="raw-meta">${written}</td>
+      </tr>
+    `;
+  }).join('');
+
   body.innerHTML = `
     <div class="summary-grid" style="margin-bottom:14px">
       <div class="summary-card cyan">
@@ -535,7 +553,20 @@ function renderHealthBlock(health) {
         <div class="value" style="font-size:14px">${latest?.date || '—'}</div>
       </div>
     </div>
-    <div class="chart-wrapper" style="height:200px"><canvas id="stepsChart"></canvas></div>
+    <details class="raw-audit" open>
+      <summary>## raw_feed [last_7d] — compare to apple health</summary>
+      <table class="raw-audit-table">
+        <thead>
+          <tr><th>date</th><th>sleep_hrs</th><th>steps</th><th>stand_hrs</th><th>written_at</th></tr>
+        </thead>
+        <tbody>${rawRows}</tbody>
+      </table>
+      <div class="settings-help" style="margin-top:8px">
+        > if a row doesn't match apple health, the bug is in the shortcut (wrong metric, wrong units, wrong date).
+        tap the shortcut → edit → verify each healthkit query.
+      </div>
+    </details>
+    <div class="chart-wrapper" style="height:200px;margin-top:12px"><canvas id="stepsChart"></canvas></div>
     <div class="chart-wrapper" style="height:200px;margin-top:12px"><canvas id="sleepHealthChart"></canvas></div>
     <div class="chart-wrapper" style="height:200px;margin-top:12px"><canvas id="standChart"></canvas></div>
   `;
@@ -3526,11 +3557,12 @@ function renderAnalytics() {
   `);
   main.appendChild(macrosContainer);
 
-  // ── Baseline stacked chart: sleep / steps / stand from health feed ──
-  // Values are normalized to % of target so they can stack on one axis.
-  const SLEEP_TARGET = 8;
-  const STEPS_TARGET = 10000;
-  const STAND_TARGET = 12;
+  // ── Baseline grouped chart: sleep / steps / stand ──
+  // Each bar shows that metric as % of its own target so they're
+  // directly comparable on one axis.
+  const SLEEP_TARGET = 8;        // hours
+  const STEPS_TARGET = 10000;    // steps
+  const STAND_TARGET = 12;       // hours
   const health = getCachedHealth();
   const baselineOrder = ['sleep', 'steps', 'stand'];
   const baselineBarColors = {
@@ -3545,7 +3577,9 @@ function renderAnalytics() {
   };
   const baselineDates = lastNDates(30);
   const baselineLabels = [];
-  const baselineData = { sleep: [], steps: [], stand: [] };
+  const baselineData = { sleep: [], steps: [], stand: [] };   // percentages
+  const baselineRaw  = { sleep: [], steps: [], stand: [] };   // underlying values
+  const pct = (v, target) => target > 0 ? Math.round((v / target) * 1000) / 10 : 0;
   for (const d of baselineDates) {
     const entry = health[d] || {};
     const sleepHrs = entry.sleep_hrs != null ? Number(entry.sleep_hrs) : 0;
@@ -3553,14 +3587,23 @@ function renderAnalytics() {
     const standHrs = entry.stand_hrs != null ? Number(entry.stand_hrs) : 0;
     if (sleepHrs + steps + standHrs === 0) continue;
     baselineLabels.push(d.slice(5));
-    baselineData.sleep.push(Math.round(sleepHrs * 10) / 10);
-    baselineData.steps.push(Math.round(steps / 1000 * 10) / 10); // show thousands
-    baselineData.stand.push(Math.round(standHrs));
+    baselineRaw.sleep.push(sleepHrs);
+    baselineRaw.steps.push(steps);
+    baselineRaw.stand.push(standHrs);
+    baselineData.sleep.push(pct(sleepHrs, SLEEP_TARGET));
+    baselineData.steps.push(pct(steps,    STEPS_TARGET));
+    baselineData.stand.push(pct(standHrs, STAND_TARGET));
   }
+  const fmtRaw = (field, v) => {
+    if (field === 'sleep') return `${Math.round(v * 10) / 10}h / ${SLEEP_TARGET}h`;
+    if (field === 'steps') return `${Math.round(v).toLocaleString()} / ${STEPS_TARGET.toLocaleString()}`;
+    if (field === 'stand') return `${Math.round(v)}h / ${STAND_TARGET}h`;
+    return String(v);
+  };
 
   const baselineContainer = el(`
     <div class="chart-container" data-chart="baseline">
-      <div class="section-title pink">## baseline [hrs · 1k steps · hrs]</div>
+      <div class="section-title pink">## baseline [% to target]</div>
       <div class="chart-wrapper" style="height:260px"><canvas id="baselineChart"></canvas></div>
     </div>
   `);
@@ -3713,6 +3756,8 @@ function renderAnalytics() {
       backgroundColor: baselineBarColors[f],
       borderColor: baselineBarColors[f],
       borderWidth: 1,
+      // Smuggle raw values through the dataset so tooltips/datalabels can read them
+      rawValues: baselineRaw[f],
     });
   });
   baselineOrder.forEach(f => {
@@ -3721,14 +3766,13 @@ function renderAnalytics() {
       type: 'line',
       label: `${f}_trend`,
       data: linearRegression(baselineData[f]),
-      borderColor: '#FFFF55',
-      backgroundColor: '#FFFF55',
+      borderColor: baselineBarColors[f],
+      backgroundColor: baselineBarColors[f],
       borderWidth: 2,
       borderDash: s.borderDash,
       fill: false,
       pointRadius: 0,
       tension: 0,
-      yAxisID: 'yTrend',
     });
   });
 
@@ -3750,20 +3794,25 @@ function renderAnalytics() {
             filter: (item) => !item.text.endsWith('_trend'),
           },
         },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const f = ctx.dataset.label;
+              if (f.endsWith('_trend')) return null;
+              const pctVal = ctx.parsed.y;
+              const raw = ctx.dataset.rawValues?.[ctx.dataIndex];
+              const rawStr = raw != null ? ' · ' + fmtRaw(f, raw) : '';
+              return `${f}: ${pctVal}%${rawStr}`;
+            },
+          },
+        },
         datalabels: {
           display: (ctx) => ctx.dataset.type !== 'line' && ctx.dataset.data[ctx.dataIndex] > 0,
           anchor: 'end',
           align: 'end',
           color: '#FFAFCC',
           font: { family: 'Menlo, monospace', size: 8, weight: '600' },
-          formatter: (v, ctx) => {
-            if (!v) return '';
-            const label = ctx.dataset.label;
-            if (label === 'sleep') return v + 'h';
-            if (label === 'steps') return v + 'k';
-            if (label === 'stand') return v + 'h';
-            return String(v);
-          },
+          formatter: (v) => (v > 0 ? v + '%' : ''),
           offset: -2,
         },
       },
@@ -3775,14 +3824,14 @@ function renderAnalytics() {
         },
         y: {
           beginAtZero: true,
-          ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 9 } },
+          suggestedMax: 120,
+          ticks: {
+            color: '#FFAFCC',
+            font: { family: 'Menlo, monospace', size: 9 },
+            callback: (v) => v + '%',
+          },
           grid: { color: 'rgba(255,175,204,0.1)', lineWidth: 1 },
           border: { color: 'rgba(255,175,204,0.3)' },
-        },
-        yTrend: {
-          position: 'right',
-          display: false,
-          beginAtZero: true,
         },
       },
     },
@@ -3792,7 +3841,8 @@ function renderAnalytics() {
   // and rebuild the baseline chart once it lands.
   fetchHealthData().then(freshHealth => {
     const freshLabels = [];
-    const freshData = { sleep: [], steps: [], stand: [] };
+    const freshPct = { sleep: [], steps: [], stand: [] };
+    const freshRaw = { sleep: [], steps: [], stand: [] };
     for (const d of baselineDates) {
       const entry = freshHealth[d] || {};
       const sleepHrs = entry.sleep_hrs != null ? Number(entry.sleep_hrs) : 0;
@@ -3800,19 +3850,25 @@ function renderAnalytics() {
       const standHrs = entry.stand_hrs != null ? Number(entry.stand_hrs) : 0;
       if (sleepHrs + steps + standHrs === 0) continue;
       freshLabels.push(d.slice(5));
-      freshData.sleep.push(Math.round(sleepHrs * 10) / 10);
-      freshData.steps.push(Math.round(steps / 1000 * 10) / 10);
-      freshData.stand.push(Math.round(standHrs));
+      freshRaw.sleep.push(sleepHrs);
+      freshRaw.steps.push(steps);
+      freshRaw.stand.push(standHrs);
+      freshPct.sleep.push(pct(sleepHrs, SLEEP_TARGET));
+      freshPct.steps.push(pct(steps,    STEPS_TARGET));
+      freshPct.stand.push(pct(standHrs, STAND_TARGET));
     }
     const chart = chartInstances.find(c => c.canvas?.id === 'baselineChart');
     if (!chart) return;
     chart.data.labels = freshLabels;
-    chart.data.datasets[0].data = freshData.sleep;
-    chart.data.datasets[1].data = freshData.steps;
-    chart.data.datasets[2].data = freshData.stand;
-    chart.data.datasets[3].data = linearRegression(freshData.sleep);
-    chart.data.datasets[4].data = linearRegression(freshData.steps);
-    chart.data.datasets[5].data = linearRegression(freshData.stand);
+    chart.data.datasets[0].data = freshPct.sleep;
+    chart.data.datasets[0].rawValues = freshRaw.sleep;
+    chart.data.datasets[1].data = freshPct.steps;
+    chart.data.datasets[1].rawValues = freshRaw.steps;
+    chart.data.datasets[2].data = freshPct.stand;
+    chart.data.datasets[2].rawValues = freshRaw.stand;
+    chart.data.datasets[3].data = linearRegression(freshPct.sleep);
+    chart.data.datasets[4].data = linearRegression(freshPct.steps);
+    chart.data.datasets[5].data = linearRegression(freshPct.stand);
     chart.update();
   }).catch(() => {});
 
