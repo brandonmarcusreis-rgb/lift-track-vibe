@@ -285,13 +285,12 @@ async function putContents(sha) {
   catch (e) { throw new Error('headers: ' + (e.message || e)); }
   try {
     // Also pull auxiliary localStorage keys that live outside of state
-    // (baseline manual overrides, heatmap tracking, unit, rest timer).
+    // (baseline manual overrides, heatmap tracking, unit).
     const prefs = {};
     const PREF_KEYS = [
       'lift_app_baseline_manual',
       'lift_app_group_last_worked',
       'lift_app_unit',
-      'lift_app_rest_timer_seconds',
     ];
     for (const k of PREF_KEYS) {
       const v = localStorage.getItem(k);
@@ -2574,17 +2573,7 @@ function enableTouchReorder(listEl, onReorder) {
   listEl.addEventListener('touchcancel', finishTouch);
 }
 
-// ─── Dashboard header: date/time + rest timer ───
-const REST_TIMER_KEY = 'lift_app_rest_timer_seconds';
-
-function getLastRestSeconds() {
-  return parseInt(localStorage.getItem(REST_TIMER_KEY) || '90', 10);
-}
-
-function setLastRestSeconds(n) {
-  localStorage.setItem(REST_TIMER_KEY, String(n));
-}
-
+// ─── Dashboard header: date/time + daily_tracking pill + macros summary ───
 function formatClock(date) {
   const opts = { weekday: 'short', month: 'short', day: 'numeric' };
   const dateStr = date.toLocaleDateString('en-US', opts).toLowerCase();
@@ -2592,64 +2581,27 @@ function formatClock(date) {
   return { dateStr, timeStr };
 }
 
-// Flashes a rainbow overlay across the screen for one beat.
-// Used in the final 5-second countdown of the rest timer.
-function triggerScreenFlash() {
-  let overlay = document.getElementById('rainbow-flash-overlay');
-  if (!overlay) {
-    overlay = document.createElement('div');
-    overlay.id = 'rainbow-flash-overlay';
-    document.body.appendChild(overlay);
-  }
-  // Restart the animation
-  overlay.classList.remove('flashing');
-  void overlay.offsetWidth; // force reflow
-  overlay.classList.add('flashing');
-}
-
 function renderDashboardHeader(day) {
-  const PRESETS = [30, 60, 90, 120, 180];
   const header = el(`
     <div class="dashboard-header">
-      <div class="dash-datetime">
-        <div class="dash-datetime-top">
+      <div class="dash-row-top">
+        <div class="dash-datetime">
           <div class="dash-date" data-role="dash-date">—</div>
           <div class="dash-time" data-role="dash-time">—</div>
-          <button class="dash-pill dash-pill-tracking" data-role="open-tracking">
-            <span class="dash-pill-dot"></span>daily_tracking
-          </button>
         </div>
-        <div class="dash-datetime-bottom">
-          <button class="dash-macros-box" data-role="open-macros" aria-label="open macros">
-            <div class="dash-macros-label">## macros</div>
-            <div class="dash-macros-row">
-              <div class="dash-macros-cell"><span class="dash-macros-key">p</span><span class="dash-macros-val" data-macro-val="protein">—</span></div>
-              <div class="dash-macros-cell"><span class="dash-macros-key">c</span><span class="dash-macros-val" data-macro-val="carb">—</span></div>
-              <div class="dash-macros-cell"><span class="dash-macros-key">f</span><span class="dash-macros-val" data-macro-val="fat">—</span></div>
-              <div class="dash-macros-cell"><span class="dash-macros-key">fb</span><span class="dash-macros-val" data-macro-val="fiber">—</span></div>
-            </div>
-          </button>
-        </div>
+        <button class="dash-pill dash-pill-tracking" data-role="open-tracking">
+          <span class="dash-pill-dot"></span>daily_tracking
+        </button>
       </div>
-      <div class="dash-timer">
-        <div class="timer-ring-wrapper">
-          <svg class="timer-ring" viewBox="0 0 100 100">
-            <circle class="timer-ring-bg" cx="50" cy="50" r="45"/>
-            <circle class="timer-ring-fg" cx="50" cy="50" r="45" data-role="ring-fg"/>
-          </svg>
-          <button class="timer-ring-center" data-role="timer-toggle" aria-label="start timer">
-            <span class="timer-readout" data-role="timer-readout">0:90</span>
-            <span class="timer-label" data-role="timer-label" data-state="idle"></span>
-          </button>
+      <button class="dash-macros-box" data-role="open-macros" aria-label="open macros">
+        <div class="dash-macros-label">## macros</div>
+        <div class="dash-macros-row">
+          <div class="dash-macros-cell"><span class="dash-macros-key">p</span><span class="dash-macros-val" data-macro-val="protein">—</span></div>
+          <div class="dash-macros-cell"><span class="dash-macros-key">c</span><span class="dash-macros-val" data-macro-val="carb">—</span></div>
+          <div class="dash-macros-cell"><span class="dash-macros-key">f</span><span class="dash-macros-val" data-macro-val="fat">—</span></div>
+          <div class="dash-macros-cell"><span class="dash-macros-key">fb</span><span class="dash-macros-val" data-macro-val="fiber">—</span></div>
         </div>
-        <div class="timer-steppers">
-          <button class="timer-stepper" data-role="timer-minus" aria-label="minus 15">−15</button>
-          <button class="timer-stepper" data-role="timer-plus" aria-label="plus 15">+15</button>
-        </div>
-        <div class="timer-presets">
-          ${PRESETS.map(s => `<button class="timer-preset" data-preset="${s}">${s >= 60 ? (s/60 % 1 === 0 ? `${s/60}m` : `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`) : s+'s'}</button>`).join('')}
-        </div>
-      </div>
+      </button>
     </div>
   `);
 
@@ -2672,141 +2624,6 @@ function renderDashboardHeader(day) {
     node.textContent = v ? v + 'g' : '—';
   });
 
-  const readout = header.querySelector('[data-role="timer-readout"]');
-  const label = header.querySelector('[data-role="timer-label"]');
-  const ringFg = header.querySelector('[data-role="ring-fg"]');
-  const toggleBtn = header.querySelector('[data-role="timer-toggle"]');
-  const minusBtn = header.querySelector('[data-role="timer-minus"]');
-  const plusBtn = header.querySelector('[data-role="timer-plus"]');
-  const presetBtns = header.querySelectorAll('.timer-preset');
-
-  const RING_CIRCUMFERENCE = 2 * Math.PI * 45; // r=45 in 100x100 viewBox
-  ringFg.style.strokeDasharray = String(RING_CIRCUMFERENCE);
-  ringFg.style.strokeDashoffset = '0';
-
-  let timerInterval = null;
-  let target = getLastRestSeconds(); // what the user last used (for the ring fill)
-  let remaining = target;
-
-  const formatRemaining = (s) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${m}:${String(sec).padStart(2,'0')}`;
-  };
-
-  const paintRing = () => {
-    const progress = target > 0 ? Math.max(0, Math.min(1, remaining / target)) : 1;
-    ringFg.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - progress));
-  };
-
-  const updatePresetHighlight = () => {
-    presetBtns.forEach(b => {
-      b.classList.toggle('active', parseInt(b.dataset.preset, 10) === target);
-    });
-  };
-
-  const setLabel = (state) => { label.dataset.state = state; };
-  const stopTimer = () => {
-    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-    header.classList.remove('timer-running');
-    setLabel('idle');
-  };
-
-  const tick = () => {
-    remaining--;
-    readout.textContent = formatRemaining(remaining);
-    paintRing();
-    // Last-5-second rainbow flash + haptic
-    if (remaining > 0 && remaining <= 5) {
-      triggerScreenFlash();
-      if (navigator.vibrate) navigator.vibrate(40);
-    }
-    if (remaining <= 0) {
-      clearInterval(timerInterval);
-      timerInterval = null;
-      header.classList.remove('timer-running');
-      header.classList.add('timer-done');
-      readout.textContent = 'done';
-      setLabel('done');
-      if (navigator.vibrate) navigator.vibrate([140, 80, 140, 80, 200]);
-    }
-  };
-
-  const startTimer = () => {
-    if (header.classList.contains('timer-done')) {
-      // reset to target
-      remaining = target;
-      header.classList.remove('timer-done');
-      readout.textContent = formatRemaining(remaining);
-      paintRing();
-      setLabel('idle');
-      return;
-    }
-    if (timerInterval) {
-      // pause
-      clearInterval(timerInterval);
-      timerInterval = null;
-      header.classList.remove('timer-running');
-      setLabel('idle');
-      return;
-    }
-    header.classList.add('timer-running');
-    setLabel('running');
-    timerInterval = setInterval(tick, 1000);
-  };
-
-  const setTarget = (n, keepRemaining = false) => {
-    target = Math.max(5, Math.min(3600, n));
-    setLastRestSeconds(target);
-    if (!keepRemaining) {
-      remaining = target;
-      header.classList.remove('timer-done');
-    }
-    readout.textContent = formatRemaining(remaining);
-    paintRing();
-    updatePresetHighlight();
-    setLabel(timerInterval ? 'running' : 'idle');
-  };
-
-  let lastToggleTap = 0;
-  toggleBtn.addEventListener('click', () => {
-    const now = Date.now();
-    if (now - lastToggleTap < 350) {
-      // Double-tap → reset
-      lastToggleTap = 0;
-      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-      header.classList.remove('timer-running', 'timer-done');
-      remaining = target;
-      readout.textContent = formatRemaining(remaining);
-      paintRing();
-      setLabel('idle');
-      if (navigator.vibrate) navigator.vibrate(15);
-      return;
-    }
-    lastToggleTap = now;
-    startTimer();
-  });
-  minusBtn.addEventListener('click', () => {
-    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; header.classList.remove('timer-running'); }
-    setTarget(target - 15);
-  });
-  plusBtn.addEventListener('click', () => {
-    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; header.classList.remove('timer-running'); }
-    setTarget(target + 15);
-  });
-  presetBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-      header.classList.remove('timer-done');
-      setTarget(parseInt(btn.dataset.preset, 10));
-      // Auto-start when tapping a preset chip
-      startTimer();
-    });
-  });
-
-  readout.textContent = formatRemaining(remaining);
-  paintRing();
-  updatePresetHighlight();
   return header;
 }
 
@@ -2987,7 +2804,7 @@ function renderDay(day, opts = {}) {
     renderSupplementsRows(supplementsList, day);
   });
 
-  // ─── Dashboard wrapper (date/time + rest timer at top — NOT collapsible) ───
+  // ─── Dashboard wrapper (date/time + daily_tracking + macros at top — NOT collapsible) ───
   const dashboard = el(`<div class="dashboard-section" data-block="dashboard"></div>`);
   dashboard.appendChild(el(`<div class="dashboard-title">## your_dashboard</div>`));
   dashboard.appendChild(renderDashboardHeader(day));
@@ -4711,7 +4528,6 @@ async function exportData() {
     'lift_app_baseline_manual',
     'lift_app_group_last_worked',
     'lift_app_unit',
-    'lift_app_rest_timer_seconds',
   ];
   for (const k of PREF_KEYS) {
     const v = localStorage.getItem(k);
