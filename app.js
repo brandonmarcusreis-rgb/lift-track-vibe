@@ -3708,6 +3708,145 @@ function toggleChartFullscreen(container) {
   }, 100);
 }
 
+// Returns HTML for a small "this week vs avg" badge in the bottom-right of an
+// avg box. ▲ green if above avg, ▼ red if below; nothing within ±5%.
+function trendBadgeHtml(thisWeek, avg, marginPct = 5) {
+  if (avg == null || thisWeek == null || avg === 0) return '';
+  const pctDelta = ((thisWeek - avg) / avg) * 100;
+  if (Math.abs(pctDelta) < marginPct) return '';
+  const isUp = pctDelta > 0;
+  const color = isUp ? '#22C55E' : '#EF4444';
+  const arrow = isUp ? '▲' : '▼';
+  return `<div class="avg-trend-badge" style="color:${color}"><span class="avg-trend-arrow">${arrow}</span>${Math.abs(Math.round(pctDelta))}%</div>`;
+}
+
+// Builds an avg-report box (water-tracker-style) with a custom shape SVG that
+// fills from the bottom proportional to fillPct. Returns a DOM element.
+function buildAvgBox({key, title, titleColor, color1, color2, strokeColor, shapePath, fillPct, mainText, mainSize = 20, captionText, thisWeek, avg}) {
+  const gradId = `grad-${key}`;
+  const clipId = `clip-${key}`;
+  const fillTopY = (1 - Math.min(100, Math.max(0, fillPct)) / 100) * 96;
+  const fillH = 96 - fillTopY;
+  return el(`
+    <div class="chart-container avg-stat-box" data-chart="${key}-avg" style="--avg-color:${titleColor}; --avg-stroke:${strokeColor};">
+      <div class="avg-box-title" style="color:${titleColor}">## ${key}_avg</div>
+      <div class="avg-stat-visual">
+        <svg viewBox="0 0 80 96" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <clipPath id="${clipId}"><path d="${shapePath}"/></clipPath>
+            <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${color1}"/>
+              <stop offset="100%" stop-color="${color2}"/>
+            </linearGradient>
+          </defs>
+          <path d="${shapePath}" fill="none" stroke="${strokeColor}" stroke-width="2" stroke-linejoin="round"/>
+          <rect x="0" y="${fillTopY}" width="80" height="${fillH}" fill="url(#${gradId})" clip-path="url(#${clipId})" opacity="0.9"/>
+          <text x="40" y="56" text-anchor="middle" fill="#FFF" font-family="Menlo, monospace" font-size="${mainSize}" font-weight="700" style="text-shadow:0 1px 2px rgba(0,0,0,0.7)">${mainText}</text>
+        </svg>
+      </div>
+      <div class="avg-stat-caption">${captionText}</div>
+      ${trendBadgeHtml(thisWeek, avg)}
+    </div>
+  `);
+}
+
+// SVG paths (80x96 viewBox) for each avg box's icon shape.
+const AVG_SHAPES = {
+  // Crescent moon — outer 36-radius arc, inner 28-radius arc creating a crescent
+  sleep: 'M 56 12 A 36 36 0 1 0 56 84 A 28 28 0 1 1 56 12 Z',
+  // Vertical capsule / column (steps)
+  steps: 'M 30 12 H 50 Q 56 12 56 18 V 78 Q 56 84 50 84 H 30 Q 24 84 24 78 V 18 Q 24 12 30 12 Z',
+  // Circle (stand activity ring)
+  stand: 'M 40 14 A 34 34 0 1 0 40 82 A 34 34 0 1 0 40 14 Z',
+  // Vertical I-beam dumbbell (volume) — top plate, bar, bottom plate
+  volume: 'M 22 12 H 58 V 26 H 50 V 70 H 58 V 84 H 22 V 70 H 30 V 26 H 22 Z',
+};
+
+function computeHealthAvgs(health) {
+  const all = { sleep: [], steps: [], stand: [] };
+  const week = { sleep: [], steps: [], stand: [] };
+  const last7 = new Set(lastNDates(7));
+  for (const d of Object.keys(health)) {
+    const e = health[d] || {};
+    const sleepHrs = Number(e.sleep_hrs);
+    const steps = Number(e.steps);
+    const standHrs = Number(e.stand_hrs);
+    const inWeek = last7.has(d);
+    if (sleepHrs > 0) { all.sleep.push(sleepHrs); if (inWeek) week.sleep.push(sleepHrs); }
+    if (steps > 0)    { all.steps.push(steps);    if (inWeek) week.steps.push(steps); }
+    if (standHrs > 0) { all.stand.push(standHrs); if (inWeek) week.stand.push(standHrs); }
+  }
+  const mean = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : null;
+  return {
+    avg:    { sleep: mean(all.sleep),  steps: mean(all.steps),  stand: mean(all.stand) },
+    week:   { sleep: mean(week.sleep), steps: mean(week.steps), stand: mean(week.stand) },
+  };
+}
+
+function buildSleepBox(avg, thisWeek) {
+  const SLEEP_TARGET = 8;
+  const v = avg != null ? Math.round(avg * 10) / 10 : null;
+  const pct = v != null ? Math.min(100, Math.round((v / SLEEP_TARGET) * 100)) : 0;
+  return buildAvgBox({
+    key: 'sleep',
+    titleColor: '#FFAFCC',
+    color1: '#A78BFA', color2: '#7C3AED',
+    strokeColor: 'rgba(255, 175, 204, 0.45)',
+    shapePath: AVG_SHAPES.sleep,
+    fillPct: pct,
+    mainText: v != null ? `${v}h` : '—',
+    mainSize: 18,
+    captionText: `target: ${SLEEP_TARGET}h · ${v != null ? pct + '%' : '—'}`,
+    thisWeek, avg,
+  });
+}
+
+function buildStepsBox(avg, thisWeek) {
+  const STEPS_TARGET = 10000;
+  const v = avg != null ? Math.round(avg) : null;
+  const pct = v != null ? Math.min(100, Math.round((v / STEPS_TARGET) * 100)) : 0;
+  const display = v != null ? (v >= 1000 ? `${(v/1000).toFixed(1)}k` : String(v)) : '—';
+  return buildAvgBox({
+    key: 'steps',
+    titleColor: '#34D399',
+    color1: '#34D399', color2: '#059669',
+    strokeColor: 'rgba(52, 211, 153, 0.45)',
+    shapePath: AVG_SHAPES.steps,
+    fillPct: pct,
+    mainText: display,
+    mainSize: 18,
+    captionText: `target: 10k · ${v != null ? pct + '%' : '—'}`,
+    thisWeek, avg,
+  });
+}
+
+function buildStandBox(avg, thisWeek) {
+  const STAND_TARGET = 12;
+  const v = avg != null ? Math.round(avg * 10) / 10 : null;
+  const pct = v != null ? Math.min(100, Math.round((v / STAND_TARGET) * 100)) : 0;
+  return buildAvgBox({
+    key: 'stand',
+    titleColor: '#FB923C',
+    color1: '#FB923C', color2: '#EA580C',
+    strokeColor: 'rgba(251, 146, 60, 0.45)',
+    shapePath: AVG_SHAPES.stand,
+    fillPct: pct,
+    mainText: v != null ? `${v}h` : '—',
+    mainSize: 18,
+    captionText: `target: ${STAND_TARGET}h · ${v != null ? pct + '%' : '—'}`,
+    thisWeek, avg,
+  });
+}
+
+function renderHealthAvgRow(health) {
+  const stats = computeHealthAvgs(health);
+  const row = el(`<div class="avg-row avg-row-baseline"></div>`);
+  row.appendChild(buildSleepBox(stats.avg.sleep, stats.week.sleep));
+  row.appendChild(buildStepsBox(stats.avg.steps, stats.week.steps));
+  row.appendChild(buildStandBox(stats.avg.stand, stats.week.stand));
+  return row;
+}
+
 function renderAnalytics() {
   const main = document.getElementById('content');
   main.innerHTML = '';
@@ -3743,70 +3882,8 @@ function renderAnalytics() {
   `);
   main.appendChild(prContainer);
 
-  // ── Macros row: averages (left) + stacked chart (right) ──
+  // ── Macros averages (compact chip bar) ──
   const macroOrder = ['protein', 'fiber', 'carb', 'fat'];
-  const macroBarColors = {
-    protein: '#1E3A8A', // deep navy
-    fiber:   '#3B82F6', // royal blue
-    carb:    '#60A5FA', // sky
-    fat:     '#BFDBFE', // powder
-  };
-  // Pattern fills so each macro is visually distinct beyond just hue
-  const macroPatternStyles = {
-    protein: 'solid',
-    carb:    'diagonal',
-    fat:     'dots',
-    fiber:   'diamonds',
-  };
-  function makeMacroPattern(color, style) {
-    const c = document.createElement('canvas');
-    c.width = 12; c.height = 12;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = color;
-    ctx.fillRect(0, 0, 12, 12);
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.lineWidth = 1.5;
-    if (style === 'diagonal') {
-      ctx.beginPath();
-      ctx.moveTo(0, 12); ctx.lineTo(12, 0);
-      ctx.moveTo(-3, 9); ctx.lineTo(9, -3);
-      ctx.moveTo(3, 15); ctx.lineTo(15, 3);
-      ctx.stroke();
-    } else if (style === 'dots') {
-      ctx.beginPath();
-      ctx.arc(3, 3, 1.5, 0, Math.PI * 2);
-      ctx.arc(9, 9, 1.5, 0, Math.PI * 2);
-      ctx.arc(9, 3, 1.5, 0, Math.PI * 2);
-      ctx.arc(3, 9, 1.5, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (style === 'diamonds') {
-      const drawDiamond = (cx, cy, r) => {
-        ctx.beginPath();
-        ctx.moveTo(cx, cy - r);
-        ctx.lineTo(cx + r, cy);
-        ctx.lineTo(cx, cy + r);
-        ctx.lineTo(cx - r, cy);
-        ctx.closePath();
-        ctx.stroke();
-      };
-      drawDiamond(6, 6, 3);
-      drawDiamond(0, 0, 2);
-      drawDiamond(12, 0, 2);
-      drawDiamond(0, 12, 2);
-      drawDiamond(12, 12, 2);
-    }
-    return ctx.createPattern(c, 'repeat');
-  }
-  const trendYellow = '#FFFF55';
-  const trendStyles = {
-    protein: { borderDash: [],     pointStyle: 'circle',  pointRadius: 0 },
-    fiber:   { borderDash: [6, 4], pointStyle: 'circle',  pointRadius: 0 },
-    carb:    { borderDash: [2, 3], pointStyle: 'circle',  pointRadius: 0 },
-    fat:     { borderDash: [],     pointStyle: 'rectRot', pointRadius: 6 },
-  };
-
-  const macroDayLabels = [];
   const macroData = { protein: [], fiber: [], carb: [], fat: [] };
   for (let w = 1; w <= currentWeek; w++) {
     for (const d of dayNames) {
@@ -3817,7 +3894,6 @@ function renderAnalytics() {
         fat:     parseFloat(getMacro(w, d, 'fat')) || 0,
       };
       if (vals.protein + vals.fiber + vals.carb + vals.fat > 0) {
-        macroDayLabels.push(`w${String(w).padStart(2,'0')} ${d.slice(0,3)}`);
         macroOrder.forEach(f => macroData[f].push(vals[f]));
       }
     }
@@ -3837,18 +3913,23 @@ function renderAnalytics() {
     return `<div class="macro-avg-chip"><div class="macro-avg-label">${f}</div><div class="macro-avg-value">${avg != null ? avg + 'g' : '—'}<span class="macro-avg-goal">${goalTxt}</span></div></div>`;
   }).join('');
 
-  // ── Water intake average (cups/day) across all logged days ──
+  // ── Water intake average (cups/day) ──
   const waterValues = [];
+  const thisWeekWaterValues = [];
   for (let w = 1; w <= currentWeek; w++) {
     for (const d of Object.keys(DAYS)) {
       const arr = state?.[w]?.[d]?.water;
       if (Array.isArray(arr)) {
         const cups = arr.reduce((a,b) => a + (b || 0), 0);
-        if (cups > 0) waterValues.push(cups);
+        if (cups > 0) {
+          waterValues.push(cups);
+          if (w === currentWeek) thisWeekWaterValues.push(cups);
+        }
       }
     }
   }
   const avgWater = waterValues.length ? Math.round((waterValues.reduce((a,b) => a+b, 0) / waterValues.length) * 10) / 10 : null;
+  const thisWeekWater = thisWeekWaterValues.length ? Math.round((thisWeekWaterValues.reduce((a,b) => a+b, 0) / thisWeekWaterValues.length) * 10) / 10 : null;
   const waterPct = avgWater != null ? Math.min(100, Math.round((avgWater / 14) * 100)) : 0;
 
   const avgRow = el(`
@@ -3878,412 +3959,62 @@ function renderAnalytics() {
           </svg>
         </div>
         <div class="water-avg-caption">target: 14 · ${avgWater != null ? waterPct + '%' : '—'}</div>
+        ${trendBadgeHtml(thisWeekWater, avgWater)}
       </div>
     </div>
   `);
   main.appendChild(avgRow);
 
-  // One chart per macro — easier to read than all four stacked into one.
-  const macrosStack = el(`<div class="macros-chart-stack"></div>`);
-  macroOrder.forEach(f => {
-    const container = el(`
-      <div class="chart-container" data-chart="macros-${f}">
-        <div class="section-title orange">## ${f} [g/day]</div>
-        <div class="chart-wrapper" style="height:180px"><canvas id="macrosChart-${f}"></canvas></div>
-      </div>
-    `);
-    macrosStack.appendChild(container);
-  });
-  main.appendChild(macrosStack);
+  // ── Health avg row: sleep / steps / stand (water-tracker-style boxes) ──
+  const cachedHealth = getCachedHealth() || {};
+  const healthRow = renderHealthAvgRow(cachedHealth);
+  main.appendChild(healthRow);
 
-  // ── Baseline grouped chart: sleep / steps / stand ──
-  // Each bar shows that metric as % of its own target so they're
-  // directly comparable on one axis.
-  const SLEEP_TARGET = 8;        // hours
-  const STEPS_TARGET = 10000;    // steps
-  const STAND_TARGET = 12;       // hours
-  const health = getCachedHealth();
-  const baselineOrder = ['sleep', 'steps', 'stand'];
-  const baselineBarColors = {
-    sleep: '#818CF8',
-    steps: '#34D399',
-    stand: '#FB923C',
-  };
-  const baselineTrendStyles = {
-    sleep: { borderDash: [] },
-    steps: { borderDash: [6, 4] },
-    stand: { borderDash: [2, 3] },
-  };
-  const baselineDates = lastNDates(30);
-  const baselineLabels = [];
-  const baselineData = { sleep: [], steps: [], stand: [] };   // percentages
-  const baselineRaw  = { sleep: [], steps: [], stand: [] };   // underlying values
-  const pct = (v, target) => target > 0 ? Math.round((v / target) * 1000) / 10 : 0;
-  for (const d of baselineDates) {
-    const entry = health[d] || {};
-    const sleepHrs = entry.sleep_hrs != null ? Number(entry.sleep_hrs) : 0;
-    const steps = entry.steps != null ? Number(entry.steps) : 0;
-    const standHrs = entry.stand_hrs != null ? Number(entry.stand_hrs) : 0;
-    if (sleepHrs + steps + standHrs === 0) continue;
-    baselineLabels.push(d.slice(5));
-    baselineRaw.sleep.push(sleepHrs);
-    baselineRaw.steps.push(steps);
-    baselineRaw.stand.push(standHrs);
-    baselineData.sleep.push(pct(sleepHrs, SLEEP_TARGET));
-    baselineData.steps.push(pct(steps,    STEPS_TARGET));
-    baselineData.stand.push(pct(standHrs, STAND_TARGET));
-  }
-  const fmtRaw = (field, v) => {
-    if (field === 'sleep') return `${Math.round(v * 10) / 10}h / ${SLEEP_TARGET}h`;
-    if (field === 'steps') return `${Math.round(v).toLocaleString()} / ${STEPS_TARGET.toLocaleString()}`;
-    if (field === 'stand') return `${Math.round(v)}h / ${STAND_TARGET}h`;
-    return String(v);
-  };
-
-  const baselineContainer = el(`
-    <div class="chart-container" data-chart="baseline">
-      <div class="section-title pink">## baseline [% to target]</div>
-      <div class="chart-wrapper" style="height:260px"><canvas id="baselineChart"></canvas></div>
-    </div>
-  `);
-  main.appendChild(baselineContainer);
-
-  // Volume area chart: x = days, series = weeks (most recent 4)
-  const startWeek = Math.max(1, currentWeek - 3);
-  const weekRange = Array.from({length: Math.min(4, currentWeek)}, (_, i) => startWeek + i);
-
-  // Distinct colors per week — earlier weeks stack in front so later
-  // weeks are visible as they grow past them.
-  // Order: [oldest, 2nd, 3rd, newest]
-  const WEEK_COLORS = [
-    '#A855F7', // oldest — purple (drawn last/on top since earlier weeks should appear in front)
-    '#EC4899', // pink
-    '#F97316', // orange
-    '#FACC15', // newest — yellow (drawn first/behind)
-  ];
-
-  // Pre-compute weekly totals for the trend chart (sits in same row)
-  const allWeeks = Array.from({length: NUM_WEEKS}, (_, i) => i + 1);
-  const sleepLabels = allWeeks.map(w => `w${String(w).padStart(2,'0')}`);
-  const volTrendData = allWeeks.map(w => calcWeekTotalVolume(w));
-
-  const weightAnalyticsSection = buildAnalyticsCollapsible('weight', '## [program]');
-  const chartRow = el(`<div class="chart-stack"></div>`);
-  weightAnalyticsSection.querySelector('.section-body').appendChild(chartRow);
-  main.appendChild(weightAnalyticsSection);
-
-  const volContainer = el(`
-    <div class="chart-container" data-chart="volume-by-day">
-      <div class="section-title yellow">## volume_by_day [last_4_weeks]</div>
-      <div class="chart-wrapper"><canvas id="volChart"></canvas></div>
-    </div>
-  `);
-  chartRow.appendChild(volContainer);
-
-  const volTrendContainer = el(`
-    <div class="chart-container" data-chart="weekly-volume">
-      <div class="section-title yellow">## weekly_volume_trend</div>
-      <div class="chart-wrapper"><canvas id="volTrendChart"></canvas></div>
-    </div>
-  `);
-  chartRow.appendChild(volTrendContainer);
-
-  // weekRange is [oldest, ..., newest]. Chart.js draws datasets in array order,
-  // so later-in-array renders ON TOP. We want OLDEST on top → reverse the order.
-  // Map colors: newest = WEEK_COLORS[3] (yellow), oldest = WEEK_COLORS[0] (purple).
-  const volDatasets = [...weekRange].reverse().map((w) => {
-    const ageFromNewest = weekRange[weekRange.length - 1] - w; // 0 for newest
-    const color = WEEK_COLORS[Math.min(ageFromNewest, WEEK_COLORS.length - 1)];
-    return {
-      label: `w${String(w).padStart(2,'0')}`,
-      data: dayNames.map(d => calcDayVolume(w, d)),
-      backgroundColor: color + '55',
-      borderColor: color,
-      borderWidth: 2,
-      fill: true,
-      tension: 0.3,
-      pointRadius: 3,
-      pointBackgroundColor: color,
-    };
-  });
-
-  chartInstances.push(new Chart(document.getElementById('volChart'), {
-    type: 'line',
-    data: {
-      labels: dayNames.map(d => d.slice(0,3)),
-      datasets: volDatasets,
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          reverse: true,
-          labels: {
-            color: '#FFFF55',
-            font: { family: 'Menlo, monospace', size: 10 },
-            boxWidth: 12,
-          },
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 11 } },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-        y: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-      },
-    },
-  }));
-
-  chartInstances.push(new Chart(document.getElementById('volTrendChart'), {
-    type: 'line',
-    data: {
-      labels: sleepLabels,
-      datasets: [{
-        label: 'total_lbs',
-        data: volTrendData,
-        borderColor: '#A855F7',
-        backgroundColor: 'rgba(168, 85, 247, 0.35)',
-        borderWidth: 2,
-        fill: true,
-        spanGaps: true,
-        tension: 0.3,
-        pointRadius: 3,
-        pointBackgroundColor: '#A855F7',
-        pointBorderColor: '#A855F7',
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          labels: {
-            color: '#FFFF55',
-            font: { family: 'Menlo, monospace', size: 10 },
-            boxWidth: 12,
-          },
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 9 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-        y: {
-          ticks: { color: '#FFFF55', font: { family: 'Menlo, monospace', size: 10 } },
-          grid: { color: 'rgba(255,255,85,0.08)' },
-          border: { color: 'rgba(255,255,85,0.3)' },
-        },
-      },
-    },
-  }));
-
-  const baselineDatasets = [];
-  baselineOrder.forEach(f => {
-    baselineDatasets.push({
-      type: 'bar',
-      label: f,
-      data: baselineData[f],
-      backgroundColor: baselineBarColors[f],
-      borderColor: baselineBarColors[f],
-      borderWidth: 1,
-      // Smuggle raw values through the dataset so tooltips/datalabels can read them
-      rawValues: baselineRaw[f],
-    });
-  });
-  baselineOrder.forEach(f => {
-    const s = baselineTrendStyles[f];
-    baselineDatasets.push({
-      type: 'line',
-      label: `${f}_trend`,
-      data: linearRegression(baselineData[f]),
-      borderColor: baselineBarColors[f],
-      backgroundColor: baselineBarColors[f],
-      borderWidth: 2,
-      borderDash: s.borderDash,
-      fill: false,
-      pointRadius: 0,
-      tension: 0,
-    });
-  });
-
-  chartInstances.push(new Chart(document.getElementById('baselineChart'), {
-    type: 'bar',
-    data: {
-      labels: baselineLabels,
-      datasets: baselineDatasets,
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          labels: {
-            color: '#FFAFCC',
-            font: { family: 'Menlo, monospace', size: 10 },
-            boxWidth: 12,
-            filter: (item) => !item.text.endsWith('_trend'),
-          },
-        },
-        tooltip: {
-          callbacks: {
-            label: (ctx) => {
-              const f = ctx.dataset.label;
-              if (f.endsWith('_trend')) return null;
-              const pctVal = ctx.parsed.y;
-              const raw = ctx.dataset.rawValues?.[ctx.dataIndex];
-              const rawStr = raw != null ? ' · ' + fmtRaw(f, raw) : '';
-              return `${f}: ${pctVal}%${rawStr}`;
-            },
-          },
-        },
-        datalabels: {
-          display: (ctx) => ctx.dataset.type !== 'line' && ctx.dataset.data[ctx.dataIndex] > 0,
-          anchor: 'end',
-          align: 'end',
-          color: '#FFAFCC',
-          font: { family: 'Menlo, monospace', size: 8, weight: '600' },
-          formatter: (v) => (v > 0 ? v + '%' : ''),
-          offset: -2,
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: '#FFAFCC', font: { family: 'Menlo, monospace', size: 8 }, maxRotation: 60, minRotation: 60 },
-          grid: { color: 'rgba(255,175,204,0.08)', lineWidth: 1 },
-          border: { color: 'rgba(255,175,204,0.3)' },
-        },
-        y: {
-          beginAtZero: true,
-          suggestedMax: 120,
-          ticks: {
-            color: '#FFAFCC',
-            font: { family: 'Menlo, monospace', size: 9 },
-            callback: (v) => v + '%',
-          },
-          grid: { color: 'rgba(255,175,204,0.1)', lineWidth: 1 },
-          border: { color: 'rgba(255,175,204,0.3)' },
-        },
-      },
-    },
-  }));
-
-  // Background refresh: after the cached render, pull fresh health data
-  // and rebuild the baseline chart once it lands.
-  fetchHealthData().then(freshHealth => {
-    const freshLabels = [];
-    const freshPct = { sleep: [], steps: [], stand: [] };
-    const freshRaw = { sleep: [], steps: [], stand: [] };
-    for (const d of baselineDates) {
-      const entry = freshHealth[d] || {};
-      const sleepHrs = entry.sleep_hrs != null ? Number(entry.sleep_hrs) : 0;
-      const steps = entry.steps != null ? Number(entry.steps) : 0;
-      const standHrs = entry.stand_hrs != null ? Number(entry.stand_hrs) : 0;
-      if (sleepHrs + steps + standHrs === 0) continue;
-      freshLabels.push(d.slice(5));
-      freshRaw.sleep.push(sleepHrs);
-      freshRaw.steps.push(steps);
-      freshRaw.stand.push(standHrs);
-      freshPct.sleep.push(pct(sleepHrs, SLEEP_TARGET));
-      freshPct.steps.push(pct(steps,    STEPS_TARGET));
-      freshPct.stand.push(pct(standHrs, STAND_TARGET));
-    }
-    const chart = chartInstances.find(c => c.canvas?.id === 'baselineChart');
-    if (!chart) return;
-    chart.data.labels = freshLabels;
-    chart.data.datasets[0].data = freshPct.sleep;
-    chart.data.datasets[0].rawValues = freshRaw.sleep;
-    chart.data.datasets[1].data = freshPct.steps;
-    chart.data.datasets[1].rawValues = freshRaw.steps;
-    chart.data.datasets[2].data = freshPct.stand;
-    chart.data.datasets[2].rawValues = freshRaw.stand;
-    chart.data.datasets[3].data = linearRegression(freshPct.sleep);
-    chart.data.datasets[4].data = linearRegression(freshPct.steps);
-    chart.data.datasets[5].data = linearRegression(freshPct.stand);
-    chart.update();
+  // Background refresh once fresh health data lands.
+  fetchHealthData().then(fresh => {
+    const newRow = renderHealthAvgRow(fresh || {});
+    healthRow.replaceWith(newRow);
   }).catch(() => {});
 
-  // Build one chart per macro. Bars + yellow trend line + dashed goal line.
-  macroOrder.forEach(f => {
-    const datasets = [{
-      type: 'bar',
-      label: f,
-      data: macroData[f],
-      backgroundColor: macroBarColors[f],
-      borderColor: macroBarColors[f],
-      borderWidth: 1,
-      borderSkipped: false,
-    }, {
-      type: 'line',
-      label: `${f}_trend`,
-      data: linearRegression(macroData[f]),
-      borderColor: trendYellow,
-      backgroundColor: trendYellow,
-      borderWidth: 2,
-      borderDash: [],
-      fill: false,
-      pointRadius: 0,
-      tension: 0,
-    }];
-    const target = macroGoals[f];
-    if (target > 0) {
-      datasets.push({
-        type: 'line',
-        label: `${f}_goal`,
-        data: macroDayLabels.map(() => target),
-        borderColor: '#FF9933',
-        backgroundColor: '#FF9933',
-        borderWidth: 1.5,
-        borderDash: [2, 4],
-        fill: false,
-        pointRadius: 0,
-        tension: 0,
-      });
-    }
-    chartInstances.push(new Chart(document.getElementById(`macrosChart-${f}`), {
-      type: 'bar',
-      data: { labels: macroDayLabels, datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: {
-              label: (ctx) => {
-                const v = ctx.parsed.y;
-                if (ctx.dataset.label?.endsWith('_goal')) return `goal: ${v}g`;
-                if (ctx.dataset.label?.endsWith('_trend')) return `trend: ${Math.round(v)}g`;
-                return `${f}: ${v}g`;
-              },
-            },
-          },
-          datalabels: { display: false },
-        },
-        scales: {
-          x: {
-            ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 7 }, maxRotation: 60, minRotation: 60 },
-            grid: { color: 'rgba(255,153,51,0.06)', lineWidth: 1 },
-            border: { color: 'rgba(255,153,51,0.3)' },
-          },
-          y: {
-            beginAtZero: true,
-            ticks: { color: '#FF9933', font: { family: 'Menlo, monospace', size: 8 }, callback: (v) => v + 'g' },
-            grid: { color: 'rgba(255,153,51,0.08)', lineWidth: 1 },
-            border: { color: 'rgba(255,153,51,0.3)' },
-          },
-        },
-      },
-    }));
+  // ── [program] collapsible: single volume_avg box ──
+  const allWeekVolumes = [];
+  for (let w = 1; w <= currentWeek; w++) {
+    const v = calcWeekTotalVolume(w);
+    if (v > 0) allWeekVolumes.push(v);
+  }
+  const avgVolumeLbs = allWeekVolumes.length
+    ? allWeekVolumes.reduce((a, b) => a + b, 0) / allWeekVolumes.length
+    : null;
+  const thisWeekVolumeLbs = calcWeekTotalVolume(currentWeek) || null;
+
+  const formatVolume = (lbs) => {
+    if (lbs == null) return '—';
+    const display = getUnit() === 'kg' ? lbs * KG_PER_LB : lbs;
+    if (display >= 100000) return `${Math.round(display / 1000)}k`;
+    if (display >= 10000)  return `${(display / 1000).toFixed(1)}k`;
+    if (display >= 1000)   return `${(display / 1000).toFixed(1)}k`;
+    return String(Math.round(display));
+  };
+
+  const volumeBox = buildAvgBox({
+    key: 'volume',
+    titleColor: '#FFFF55',
+    color1: '#FFFF55', color2: '#F59E0B',
+    strokeColor: 'rgba(255, 255, 85, 0.45)',
+    shapePath: AVG_SHAPES.volume,
+    fillPct: 100,
+    mainText: formatVolume(avgVolumeLbs),
+    mainSize: 18,
+    captionText: `${unitLabel()}/week avg · this wk: ${formatVolume(thisWeekVolumeLbs)}`,
+    thisWeek: thisWeekVolumeLbs,
+    avg: avgVolumeLbs,
   });
+
+  const weightAnalyticsSection = buildAnalyticsCollapsible('weight', '## [program]');
+  const programRow = el(`<div class="avg-row avg-row-program"></div>`);
+  programRow.appendChild(volumeBox);
+  weightAnalyticsSection.querySelector('.section-body').appendChild(programRow);
+  main.appendChild(weightAnalyticsSection);
 
   // Wire tap-to-fullscreen on chart titles only (so the chart canvas stays interactive)
   main.querySelectorAll('.chart-container').forEach(container => {
