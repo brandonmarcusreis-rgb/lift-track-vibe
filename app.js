@@ -2286,6 +2286,30 @@ function getTopSet(week, day, exName) {
   return best;
 }
 
+// All-time PR for an exercise across every week/day. Heaviest weight wins;
+// ties broken by reps. Does NOT require the exercise to be marked completed —
+// any logged set with valid lbs+reps counts.
+function getAllTimePR(exName) {
+  let best = null;
+  for (let w = 1; w <= NUM_WEEKS; w++) {
+    const weekData = state?.[w];
+    if (!weekData) continue;
+    for (const day of Object.keys(DAYS)) {
+      const sets = weekData?.[day]?.exercises?.[exName]?.sets;
+      if (!Array.isArray(sets)) continue;
+      for (const s of sets) {
+        const lbs = parseFloat(s.lbs);
+        const reps = parseFloat(s.reps);
+        if (isNaN(lbs) || isNaN(reps) || lbs <= 0 || reps <= 0) continue;
+        if (!best || lbs > best.lbs || (lbs === best.lbs && reps > best.reps)) {
+          best = { lbs, reps, week: w };
+        }
+      }
+    }
+  }
+  return best;
+}
+
 function computePREvolution() {
   const result = [];
   if (currentWeek < 2) return result;
@@ -2812,9 +2836,14 @@ function renderDay(day, opts = {}) {
   // Water tracker — always visible
   dashboard.appendChild(renderWaterTracker(day));
 
-  const baselineBlock = renderBaseline(day);
-  dashboard.appendChild(baselineBlock);
-  wireSelfCollapse(baselineBlock, 'habits_baseline');
+  // ─── BASELINE BOX REMOVED 2026-05-08 ───
+  // Per user request, the daily ## baseline block (sleep/stand/steps + scores)
+  // is hidden for now. The full implementation is preserved untouched in
+  // renderBaseline() / updateBaseline() / getManualBaseline() / etc. below.
+  // To restore: uncomment the three lines that follow.
+  // const baselineBlock = renderBaseline(day);
+  // dashboard.appendChild(baselineBlock);
+  // wireSelfCollapse(baselineBlock, 'habits_baseline');
 
   // Wire up the daily_tracking pill → pops modal with the habits block
   const trackingPill = dashboard.querySelector('[data-role="open-tracking"]');
@@ -3006,13 +3035,18 @@ function buildWeightSection(day, exercises, prevWeek) {
     const isCompleted = !!exState?.completed;
     const collapseKey = `${currentWeek}:${day}:${ex.name}`;
     const isCollapsed = collapsedExercises.has(collapseKey);
+    const pr = getAllTimePR(ex.name);
+    const prText = pr
+      ? `&gt;&gt; pr ${lbsToDisplay(pr.lbs)} ${unitLabel()} × ${pr.reps} <span class="exercise-pr-week">w${pr.week}</span>`
+      : `&gt;&gt; pr —`;
     const card = el(`
       <div class="exercise${isCompleted ? ' completed' : ''}${isCollapsed ? ' collapsed' : ''}">
         <div class="exercise-header">
           <div class="exercise-header-row">
-            <div>
+            <div class="exercise-header-info">
               <div class="exercise-name">> ${exKey(ex.name)}</div>
               <div class="exercise-group">${ex.group.toLowerCase()}</div>
+              <div class="exercise-pr${pr ? '' : ' empty'}">${prText}</div>
             </div>
             <div class="exercise-header-actions">
               <button class="btn-collapse" aria-label="toggle collapse">▾</button>

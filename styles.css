@@ -1838,6 +1838,34 @@ main {
   margin-top: 2px;
 }
 
+/* All-time PR line, sits below .exercise-group inside .exercise-header-info.
+   The flex column on the left already constrains width, so long PR strings
+   wrap rather than push the action buttons. */
+.exercise-header-info {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.exercise-pr {
+  font-size: 10px;
+  color: var(--green, #28FE14);
+  margin-top: 3px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exercise-pr.empty {
+  color: var(--fg-dim);
+}
+.exercise-pr-week {
+  color: var(--fg-dim);
+  margin-left: 4px;
+  font-size: 9px;
+}
+.exercise.completed .exercise-pr {
+  opacity: 0.55;
+}
+
 /* Demo mode banner (sits above everything when active) */
 .demo-banner {
   position: fixed;
@@ -2233,6 +2261,7 @@ body.demo-active { padding-top: 28px; }
 .macros-chart-stack .chart-container { margin: 0; }
 .exercise.collapsed .sets { display: none; }
 .exercise.collapsed .exercise-group { display: none; }
+.exercise.collapsed .exercise-pr { display: none; }
 
 .btn-copy-prev {
   background: transparent;
