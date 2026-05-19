@@ -1954,6 +1954,83 @@ function copyProgramFrom(toDay, fromWeek, fromDay) {
   saveState();
 }
 
+// ── Whole-week program propagation ──────────────────────────────
+const WEEK_DAYS = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+function wk2(n) { return String(n).padStart(2, '0'); }
+
+// A week is "empty" if no day has a program list or any logged exercise.
+function isWeekEmpty(w) {
+  const wd = state[w];
+  if (!wd) return true;
+  for (const day of Object.keys(wd)) {
+    const slot = wd[day];
+    if (!slot) continue;
+    if (Array.isArray(slot.exerciseList) && slot.exerciseList.length > 0) return false;
+    if (slot.exercises && Object.keys(slot.exercises).length > 0) return false;
+  }
+  return true;
+}
+
+// Copy an ENTIRE week (all 7 days) program + set weights/reps from
+// fromWeek into toWeek. Mirrors copyProgramFrom semantics: exerciseList
+// + each set's lbs/reps carry over, completed resets to false. Overwrite
+// semantics — toWeek's matching days are replaced.
+function copyWeekProgram(fromWeek, toWeek) {
+  if (fromWeek === toWeek || !state[fromWeek]) return false;
+  state[toWeek] ??= {};
+  let touched = false;
+  for (const day of WEEK_DAYS) {
+    const srcList = getExercisesForWeekDay(fromWeek, day);
+    const sessionEx = state?.[fromWeek]?.[day]?.exercises || {};
+    if (srcList.length === 0 && Object.keys(sessionEx).length === 0) {
+      if (state[toWeek][day]) {
+        state[toWeek][day].exerciseList = [];
+        state[toWeek][day].exercises = {};
+      }
+      continue;
+    }
+    const resolvedList = [];
+    const seen = new Set();
+    for (const ex of srcList) {
+      resolvedList.push({ name: ex.name, group: ex.group || 'Core' });
+      seen.add(ex.name);
+    }
+    for (const name of Object.keys(sessionEx)) {
+      if (!seen.has(name)) { resolvedList.push({ name, group: 'Core' }); seen.add(name); }
+    }
+    state[toWeek][day] ??= { exercises: {}, sleep: '', habits: {} };
+    state[toWeek][day].exerciseList = resolvedList;
+    state[toWeek][day].exercises = {};
+    for (const ex of resolvedList) {
+      const src = sessionEx[ex.name];
+      state[toWeek][day].exercises[ex.name] = {
+        sets: (src?.sets || []).map(s => ({ lbs: s.lbs || '', reps: s.reps || '' })),
+        completed: false,
+      };
+    }
+    touched = true;
+  }
+  return touched;
+}
+
+// On week flip: if the week you land on is empty and the immediately
+// prior week has a program, offer to carry it forward.
+function maybeOfferCopyPrev() {
+  if (currentWeek < 2) return;
+  if (!isWeekEmpty(currentWeek)) return;
+  const src = currentWeek - 1;
+  if (isWeekEmpty(src)) return;
+  const ok = confirm(
+    `week_${wk2(currentWeek)} has no program yet.\n\n` +
+    `copy week_${wk2(src)} into it?\n` +
+    `(exercise program + last week's weights/reps as a starting point — nothing marked done)`
+  );
+  if (ok) {
+    copyWeekProgram(src, currentWeek);
+    saveState();
+  }
+}
+
 // Seed a rich-looking demo state for a walkthrough / showcase. Never
 // persisted — only lives in memory while demoMode === true.
 function buildDemoState() {
@@ -4216,6 +4293,36 @@ function renderSettings() {
     alert('macro goals saved');
   });
 
+  // ── Propagate program (cyan) ──
+  const _pw = currentWeek;
+  const propagateBlock = el(`
+    <div class="settings" data-box="propagate">
+      <div class="section-title">## propagate_program</div>
+      <div class="settings-help" style="margin-bottom:12px">
+        copy week_${wk2(_pw)}'s full program (exercises + its weights/reps) into
+        every later week, ${wk2(_pw + 1)}–${wk2(NUM_WEEKS)}. overwrites any existing
+        programming in those weeks. nothing is marked done. export a JSON backup
+        first if unsure.
+      </div>
+      <div class="settings-buttons">
+        <button class="btn">$ fill weeks ${wk2(_pw + 1)}–${wk2(NUM_WEEKS)} from week_${wk2(_pw)}</button>
+      </div>
+    </div>
+  `);
+  propagateBlock.querySelector('.btn').addEventListener('click', () => {
+    if (_pw >= NUM_WEEKS) { alert('already on the last week — no weeks after it.'); return; }
+    if (isWeekEmpty(_pw)) { alert(`week_${wk2(_pw)} has no program to copy. build it first.`); return; }
+    if (!confirm(
+      `OVERWRITE weeks ${wk2(_pw + 1)}–${wk2(NUM_WEEKS)} with week_${wk2(_pw)}'s program + weights/reps?\n\n` +
+      `this replaces any existing programming in those ${NUM_WEEKS - _pw} weeks. cannot be undone.`
+    )) return;
+    let n = 0;
+    for (let w = _pw + 1; w <= NUM_WEEKS; w++) { if (copyWeekProgram(_pw, w)) n++; }
+    saveState();
+    alert(`done — week_${wk2(_pw)} propagated into ${n} week${n === 1 ? '' : 's'} (${wk2(_pw + 1)}–${wk2(NUM_WEEKS)}).`);
+    renderSettings();
+  });
+
   // ── Danger zone (red) ──
   const dangerBlock = el(`
     <div class="settings" data-box="danger">
@@ -4255,15 +4362,17 @@ function renderSettings() {
   makeCollapsibleSettingsBox(unitBlock);
   makeCollapsibleSettingsBox(macroGoalsBlock);
   makeCollapsibleSettingsBox(importBlock);
+  makeCollapsibleSettingsBox(propagateBlock);
   makeCollapsibleSettingsBox(dangerBlock);
 
-  // Order: clear_cache (white) → demo (purple) → github (green) → unit (yellow) → macro_goals (orange) → import (blue) → danger (red)
+  // Order: clear_cache (white) → demo (purple) → github (green) → unit (yellow) → macro_goals (orange) → import (blue) → propagate (cyan) → danger (red)
   main.appendChild(cacheBlock);
   main.appendChild(demoBlock);
   main.appendChild(ghBlock);
   main.appendChild(unitBlock);
   main.appendChild(macroGoalsBlock);
   main.appendChild(importBlock);
+  main.appendChild(propagateBlock);
   main.appendChild(dangerBlock);
   setTimeout(updateBackupStatus, 0);
 }
@@ -5937,6 +6046,7 @@ document.querySelectorAll('#dayTabs button').forEach(btn => {
 document.getElementById('weekPrev').addEventListener('click', () => {
   if (currentWeek > 1) {
     currentWeek--;
+    maybeOfferCopyPrev();
     highlightTodayTab();
     render();
   }
@@ -5945,6 +6055,7 @@ document.getElementById('weekPrev').addEventListener('click', () => {
 document.getElementById('weekNext').addEventListener('click', () => {
   if (currentWeek < NUM_WEEKS) {
     currentWeek++;
+    maybeOfferCopyPrev();
     highlightTodayTab();
     render();
   }
